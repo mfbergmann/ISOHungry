@@ -367,7 +367,7 @@ def job(job_id):
 
 
 def _run_import(job_id, iso_path, movie, extras, include_feature, feature_ix,
-                feature_name):
+                feature_name, feature_seconds=None):
     """Encode the chosen titles into the movie folder. Runs on its own thread."""
     try:
         movie_path = movie["path"]
@@ -385,7 +385,8 @@ def _run_import(job_id, iso_path, movie, extras, include_feature, feature_ix,
             # Naming it after the folder is what Radarr's scanner expects; it
             # renames to the configured format when it imports.
             work.append((feature_ix, os.path.join(
-                movie_path, ei.safe_filename(feature_name) + ".mkv"), True))
+                movie_path, ei.safe_filename(feature_name) + ".mkv"), True,
+                feature_seconds))
         for t in extras:
             if not t.get("include"):
                 continue
@@ -395,25 +396,28 @@ def _run_import(job_id, iso_path, movie, extras, include_feature, feature_ix,
             if subdir not in ei.PLEX_EXTRA_DIRS:
                 subdir = ei.EXTRAS_SUBDIR
             work.append((t["ix"], os.path.join(
-                movie_path, subdir, ei.safe_filename(t["name"]) + ".mkv"), False))
+                movie_path, subdir, ei.safe_filename(t["name"]) + ".mkv"),
+                False, t.get("seconds")))
 
         _set(job_id, status="running", total=len(work), done=0,
              encoder=encoder, movie=movie, log=[])
 
         ok = failed = 0
-        for n, (ix, dest, is_feature) in enumerate(work, 1):
+        for n, (ix, dest, is_feature, seconds) in enumerate(work, 1):
             label = os.path.basename(dest)
             _set(job_id, current=label, done=n - 1)
             if os.path.exists(dest):
                 _append_log(job_id, "skipped (exists): %s" % label)
                 continue
-            good, err = ei.encode_title(iso_path, ix, dest, encoder)
+            good, note = ei.encode_title(iso_path, ix, dest, encoder,
+                                         expect_seconds=seconds)
             if good:
                 ok += 1
-                _append_log(job_id, "imported: %s" % label)
+                _append_log(job_id, "imported: %s%s"
+                            % (label, "  (%s)" % note if note else ""))
             else:
                 failed += 1
-                _append_log(job_id, "FAILED: %s — %s" % (label, (err or "")[:200]))
+                _append_log(job_id, "FAILED: %s — %s" % (label, (note or "")[:200]))
 
         _set(job_id, done=len(work), current="")
 
@@ -573,7 +577,8 @@ def start_discdb_sync():
 
 
 def start_import(iso_path, tmdb_id, extras, include_feature=False,
-                 feature_ix=None, feature_name=None, add_if_missing=True):
+                 feature_ix=None, feature_name=None, feature_seconds=None,
+                 add_if_missing=True):
     """Confirm the film, then kick off encoding on a background thread."""
     # One import per disc. Two jobs on the same ISO would race for the same
     # .partial paths and interleave two HandBrake runs over one optical image
@@ -612,7 +617,7 @@ def start_import(iso_path, tmdb_id, extras, include_feature=False,
     threading.Thread(
         target=_run_import,
         args=(job_id, iso_path, movie, extras, include_feature, feature_ix,
-              feature_name),
+              feature_name, feature_seconds),
         daemon=True,
     ).start()
     return job_id, movie, created

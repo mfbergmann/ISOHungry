@@ -170,6 +170,22 @@ Single-line labels on a quiet background come out clean — *Deleted Scenes*,
 sits on top of moving video, which is close to the worst case for OCR, and no
 amount of thresholding fixes all of it.
 
+### Why not read the subpicture instead?
+
+Tempting, and it was tried: a DVD's subpicture layer is a clean 4-colour bitmap,
+which would OCR far better than text sitting on video. The menu VOB does carry
+subpicture streams with real content — sixteen packets of 2–3 KB on the disc
+tested.
+
+It does not work. A DVD *menu* subpicture is the button **highlight**, displayed
+only for the currently selected button and only when the highlight command in
+the PCI activates it. ffmpeg's `dvdsub` decoder does not apply menu highlight
+palettes, so overlaying the stream renders an empty frame — forty consecutive
+frames came back byte-identical and blank. Getting anything out of it would mean
+implementing DVD menu subpicture decoding against the HLI palette, and on the
+disc tested the labels are drawn in the background video anyway, where the
+highlight would not help.
+
 It is also slow: every menu has to be rendered to frames and every button
 region OCRed, which is minutes per disc. That is why it is an explicit button
 and a background job rather than part of inspecting a disc.

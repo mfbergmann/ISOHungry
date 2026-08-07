@@ -502,7 +502,8 @@ async function confirmImport() {
     tmdbId: RV.chosen.tmdbId,
     includeFeature: !!(feat && feat.checked),
     featureIx: RV.data.feature.ix,
-    extras: RV.data.extras.map(t => ({ix: t.ix, name: t.name,
+    featureSeconds: d.feature.seconds,
+    extras: RV.data.extras.map(t => ({ix: t.ix, name: t.name, seconds: t.seconds,
                                       include: t.include, subdir: t.subdir})),
   };
   if (!body.includeFeature && !body.extras.some(t => t.include)) {

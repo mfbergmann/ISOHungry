@@ -591,6 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                         "ix": int(t.get("ix")),
                         "name": (t.get("name") or "").strip()[:120] or "Featurette",
                         "include": bool(t.get("include")),
+                        "seconds": float(t.get("seconds") or 0),
                         # Which Plex extras folder this one belongs in. Validated
                         # against the known set in library before it is used as
                         # a path component.
@@ -617,6 +618,7 @@ class Handler(BaseHTTPRequestHandler):
                     target, tmdb_id, extras,
                     include_feature=include_feature,
                     feature_ix=feature_ix,
+                    feature_seconds=payload.get("featureSeconds"),
                     feature_name=(payload.get("featureName") or "").strip()[:160] or None,
                 )
             except (ValueError, SystemExit) as e:

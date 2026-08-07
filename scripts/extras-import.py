@@ -405,7 +405,28 @@ def safe_filename(name):
     return name or "Untitled"
 
 
-def encode_title(iso_path, title_ix, dest, encoder):
+def _looks_complete(path, expect_seconds, tolerance=0.95):
+    """Duration of `path` if it is close enough to the title's length.
+
+    Returns the measured duration, or None if the file is missing, unreadable
+    or short enough to be a genuine truncation rather than a ragged tail.
+    """
+    if not expect_seconds or not os.path.exists(path):
+        return None
+    if os.path.getsize(path) == 0:
+        return None
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=120)
+        seconds = float((probe.stdout or "0").strip())
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        return None
+    return seconds if seconds >= expect_seconds * tolerance else None
+
+
+def encode_title(iso_path, title_ix, dest, encoder, expect_seconds=None):
     target_dir = os.path.dirname(dest)
     existed = os.path.isdir(target_dir)
     os.makedirs(target_dir, exist_ok=True)
@@ -434,11 +455,26 @@ def encode_title(iso_path, title_ix, dest, encoder):
         "--markers",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not os.path.exists(partial) or os.path.getsize(partial) == 0:
-        if os.path.exists(partial):
-            os.remove(partial)
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-6:]
-        return False, "\n      ".join(tail)
+
+    note = None
+    if proc.returncode != 0:
+        # HandBrake reports failure for a damaged source even when it has
+        # already written essentially the whole title. One disc here has a
+        # title whose last pack is malformed: HandBrake exits 5, and the file
+        # it produced is 373.6s of an expected 375s and decodes end to end.
+        # Throwing that away over an exit code loses a perfectly good extra,
+        # so the output gets a look before the verdict.
+        salvaged = _looks_complete(partial, expect_seconds)
+        if not salvaged:
+            if os.path.exists(partial):
+                os.remove(partial)
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-6:]
+            return False, "\n      ".join(tail)
+        note = ("HandBrake reported an error but wrote %s of an expected %s "
+                "— keeping it; the source is probably damaged near the end"
+                % (human_duration(salvaged), human_duration(expect_seconds)))
+    elif not os.path.exists(partial) or os.path.getsize(partial) == 0:
+        return False, "HandBrake exited cleanly but produced nothing"
 
     # Rename only once the encode succeeded, so an interrupted run can never
     # leave a truncated file that a later scan treats as already imported.
@@ -448,7 +484,9 @@ def encode_title(iso_path, title_ix, dest, encoder):
         os.chmod(dest, 0o664)
     except PermissionError:
         pass
-    return True, None
+    # On success `note` is None; when the encode was salvaged it carries the
+    # warning, so callers can report a kept-but-imperfect extra as such.
+    return True, note
 
 
 # ------------------------------------------------------------- notification
@@ -600,7 +638,8 @@ def cmd_apply(args):
             continue
 
         log(f"  + title {t['ix']:>2} ({t.get('duration', '?')}) -> {os.path.basename(dest)}")
-        success, err = encode_title(iso, t["ix"], dest, encoder)
+        success, err = encode_title(iso, t["ix"], dest, encoder,
+                                    expect_seconds=t.get("seconds"))
         if success:
             ok += 1
         else:
