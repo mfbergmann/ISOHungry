@@ -151,7 +151,34 @@ Labels are drawn left-aligned and the highlight rectangle tends to sit over the
 tail of the text, so anchoring on its right edge keeps the label and excludes
 whatever busy video sits beside it.
 
-Two details cost real debugging time and are worth knowing if you touch this:
+### Extras are told from setup menus by register, not by reading the words
+
+An extras menu rarely jumps straight to a title. A button stashes *which* extra
+was chosen in a general-purpose register and links to a dispatcher that reads
+it — a `SetLink` command whose bytes 2–3 are the register and 4–5 the value.
+
+That register is what separates content from furniture. A disc uses one register
+for its extras and different ones for audio, subtitle and setup. On the disc
+tested:
+
+| Register | Menu | Values |
+|---|---|---|
+| 2 | Language / setup | 1, 2, 3, 4 |
+| 10 | Audio | 10, 20 |
+| **7** | **Special features** | 11, 12, 21–24, 31–33, 51–54 |
+
+So the register most content buttons write to is taken as the extras register
+and everything else is dropped. This matters more than it sounds: setup menus
+are the worst possible contamination, because their options — *YES*, *STOP*,
+*Spanish* — are short confident words that survive OCR beautifully, score well,
+and shove the real names out of order.
+
+The values are a bonus worth more than the filtering. They are the disc's own
+index for each extra, so sorting by them gives the disc's intended order rather
+than the order its menus happened to be scanned in.
+
+Two more details cost real debugging time and are worth knowing if you touch
+this:
 
 - **`btn_ns` is at HL_GI offset 17, not 16.** Offset 16 is `btn_ofn`, the index
   the group starts at. On a paged menu that reads as 4, 8, 12, 16 … — a
