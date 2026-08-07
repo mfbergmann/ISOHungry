@@ -101,7 +101,10 @@ def parse_buttons(pci):
     """Button rectangles and VM commands from a PCI packet's highlight block."""
     if len(pci) < BTNIT_OFF:
         return []
-    btn_ns = pci[BTN_NS_OFF]
+    # libdvdread documents btn_ns as "number of valid buttons (low 6 bits)", so
+    # the top two bits are not part of the count. Unmasked, a disc that sets
+    # them would look like it had hundreds of buttons and be skipped entirely.
+    btn_ns = pci[BTN_NS_OFF] & 0x3F
     if not 1 <= btn_ns <= 36:
         return []
     out = []
