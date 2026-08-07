@@ -131,7 +131,12 @@
     display:flex; gap:.5rem; align-items:center; padding:.35rem 0;
     border-bottom:1px solid var(--edge);
   }
-  .titlerow input[type=text] { flex:1; font-size:.85rem; }
+  .titlerow input[type=text] { flex:1; font-size:.85rem; min-width:6rem; }
+  .dirsel {
+    flex:0 0 auto; background:var(--bg); color:var(--ink); font:inherit;
+    font-size:.75rem; border:1px solid var(--edge); border-radius:6px;
+    padding:.3rem .35rem; max-width:9rem;
+  }
   .titlerow .dur { color:var(--dim); font-size:.78rem;
                    font-variant-numeric:tabular-nums; min-width:4.5rem; }
   .rowbtns { display:flex; gap:.5rem; margin-top:1rem; flex-wrap:wrap; }
@@ -153,6 +158,9 @@
 
   <h2>Recently eaten</h2>
   <div id="isos"><div class="card empty">nothing yet</div></div>
+
+  <h2>Disc catalogue</h2>
+  <div id="discdb"><div class="card empty">loading…</div></div>
 
   <h2>Settings</h2>
   <div id="settings"><div class="card empty">loading…</div></div>
@@ -292,6 +300,14 @@ function esc(s) {
    which film it is and what the extras are called. */
 let REVIEW_ON = false;
 let RV = null;          // {rel, data, chosen, jobId}
+let DISCDB = {};
+
+// The folder names Plex recognises for extras. TheDiscDb's categories map onto
+// these, and the dropdown lets a wrong guess be corrected before importing.
+const PLEX_DIRS = ['Featurettes', 'Behind The Scenes', 'Deleted Scenes',
+                   'Interviews', 'Scenes', 'Shorts', 'Trailers', 'Other'];
+
+const namedCount = d => (d.extras || []).filter(t => t.source === 'thediscdb').length;
 
 async function review(rel) {
   RV = {rel, data: null, chosen: null, jobId: null};
@@ -308,6 +324,24 @@ async function review(rel) {
   RV.data = r;
   RV.chosen = r.suggestion || null;
   drawReview();
+}
+
+// What the catalogue had to say. An exact hit is stated as such; a runtime
+// guess is labelled a guess, because it is one.
+function discdbLine(d) {
+  const db = d.discdb;
+  if (!db) return '';
+  if (!db.matched) {
+    return `<div class="hint">TheDiscDb: <b>${esc(db.reason || 'no match')}</b>.
+      Names below are placeholders — once you've named them, this disc can be
+      contributed back so the next person gets them for free.</div>`;
+  }
+  const exact = db.how === 'contenthash';
+  return `<div class="hint">TheDiscDb: <span class="badge ${exact ? 'ok' : 'warn'}">${
+    exact ? 'exact disc match' : 'runtime guess ' + db.confidence}</span>
+    ${esc(db.movie)} (${esc(db.year)}) — ${esc(db.release)}.
+    ${exact ? 'Identified by the VIDEO_TS file sizes, so this is the same pressing.'
+            : 'Matched on runtimes only — check the names before importing.'}</div>`;
 }
 
 function movieCard(m, i) {
@@ -341,6 +375,7 @@ function drawReview() {
       ${d.extras.length} extra${d.extras.length === 1 ? '' : 's'} found.
       ${d.suggestion ? '' : ' No confident match, so nothing is pre-selected.'}
     </div>
+    ${discdbLine(d)}
 
     ${SHOWN.map(movieCard).join('') || '<div class="hint">No candidates — search below.</div>'}
 
@@ -373,13 +408,21 @@ function drawReview() {
             ? ' — <b>you already have a file for this film</b>' : ''}</span>
       </label>
 
-      <div class="hint" style="margin:.8rem 0 .2rem">Extras — name them from the
-        disc menu, untick anything you don't want:</div>
+      <div class="hint" style="margin:.8rem 0 .2rem">
+        ${namedCount(d) ? `Extras — <b>${namedCount(d)} of ${d.extras.length}</b>
+           named from TheDiscDb. Check them, then import:`
+          : `Extras — name them from the disc menu, untick anything you don't want:`}
+      </div>
       ${d.extras.map((t, i) => `
         <label class="titlerow">
           <input type="checkbox" ${t.include ? 'checked' : ''} id="rvInc${i}" style="flex:0">
           <span class="dur">${esc(t.duration)}</span>
           <input type="text" id="rvName${i}" value="${esc(t.name)}">
+          <select id="rvDir${i}" class="dirsel">${
+            PLEX_DIRS.map(dir => `<option${dir === (t.subdir || 'Featurettes')
+              ? ' selected' : ''}>${dir}</option>`).join('')}</select>
+          ${t.source === 'thediscdb'
+            ? '<span class="badge ok" title="name from TheDiscDb">db</span>' : ''}
         </label>`).join('') || '<div class="hint">No extras detected on this disc.</div>'}
 
       ${d.skipped.length ? `<div class="skiplist"><b>Skipped:</b><br>` +
@@ -390,6 +433,10 @@ function drawReview() {
     <div class="rowbtns">
       ${c ? `<button onclick="confirmImport()">
                ${newToLibrary ? 'Add to Radarr &amp; import' : 'Import extras'}</button>` : ''}
+      ${c && d.discdb && !d.discdb.matched
+        ? `<button class="ghost" onclick="contribute()"
+             title="Write a submission for TheDiscDb so the next person gets these names">
+             Contribute names to TheDiscDb</button>` : ''}
       <button class="ghost" onclick="skipDisc()">Not now</button>
       <button class="ghost" onclick="closeSheet()">Cancel</button>
     </div>`);
@@ -409,8 +456,10 @@ function readTitleEdits() {
   (RV.data.extras || []).forEach((t, i) => {
     const nm = document.getElementById('rvName' + i);
     const inc = document.getElementById('rvInc' + i);
+    const dir = document.getElementById('rvDir' + i);
     if (nm) t.name = nm.value;
     if (inc) t.include = inc.checked;
+    if (dir) t.subdir = dir.value;
   });
 }
 
@@ -447,7 +496,8 @@ async function confirmImport() {
     tmdbId: RV.chosen.tmdbId,
     includeFeature: !!(feat && feat.checked),
     featureIx: RV.data.feature.ix,
-    extras: RV.data.extras.map(t => ({ix: t.ix, name: t.name, include: t.include})),
+    extras: RV.data.extras.map(t => ({ix: t.ix, name: t.name,
+                                      include: t.include, subdir: t.subdir})),
   };
   if (!body.includeFeature && !body.extras.some(t => t.include)) {
     toast('nothing selected to import'); return;
@@ -479,6 +529,60 @@ async function pollJob() {
     </div>`);
   if (!done) setTimeout(pollJob, 2000);
   else refresh();
+}
+
+async function contribute() {
+  readTitleEdits();
+  const d = RV.data, c = RV.chosen;
+  const r = await post('/api/review/contribute', {
+    rel: RV.rel,
+    movie: {title: c.title, year: c.year, tmdbId: c.tmdbId},
+    featureIx: d.feature.ix,
+    featureSeconds: d.feature.seconds,
+    extras: d.extras.map(t => ({ix: t.ix, seconds: t.seconds, name: t.name,
+                                subdir: t.subdir, include: t.include})),
+  });
+  if (!r) return;
+  openSheet(`
+    <h3>Submission written</h3>
+    <div class="hint">
+      ${r.named} of ${r.titles} titles named, keyed on disc hash
+      <code>${esc(r.content_hash)}</code>.
+    </div>
+    <div class="joblog">${esc(r.release_dir)}</div>
+    <div class="hint" style="margin-top:.8rem">
+      To contribute: fork <b>github.com/TheDiscDb/data</b>, copy that
+      <code>data/</code> tree in, and open a pull request. Check the names
+      against the disc packaging first — a wrong name in a shared catalogue is
+      worse than a gap.
+    </div>
+    <div class="rowbtns"><button class="ghost" onclick="closeSheet()">Close</button></div>`);
+}
+
+function drawDiscdb() {
+  const box = $('#discdb');
+  if (!box) return;
+  if (!DISCDB.available) {
+    box.innerHTML = '<div class="card empty">catalogue lookup unavailable</div>';
+    return;
+  }
+  const when = DISCDB.built
+    ? new Date(DISCDB.built * 1000).toLocaleString() : 'never';
+  box.innerHTML = `<div class="card iso">
+    <span class="nm">🗃 TheDiscDb${DISCDB.synced
+      ? ` — <b>${DISCDB.discs}</b> DVDs indexed` : ' — not downloaded yet'}</span>
+    <span class="time">${DISCDB.synced ? 'updated ' + esc(when) : '~290 MB'}</span>
+    <button class="ghost" onclick="syncDiscdb()">
+      ${DISCDB.synced ? 'Refresh' : 'Download'}</button>
+  </div>`;
+}
+
+async function syncDiscdb() {
+  const r = await post('/api/review/discdb-sync', {});
+  if (!r) return;
+  RV = {jobId: r.job};
+  toast('fetching the catalogue…');
+  pollJob();
 }
 
 async function skipDisc() {
@@ -629,8 +733,10 @@ async function refresh() {
     `${gb(d.free_bytes)} tummy space left`;
 
   REVIEW_ON = !!d.review_enabled;
+  DISCDB = d.discdb || {};
   if (!editing) drawDrives(d.drives);
   drawIsos(d.isos);
+  drawDiscdb();
   drawLogs();
   drawSettings();
   loadLog();

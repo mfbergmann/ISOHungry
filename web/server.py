@@ -378,6 +378,7 @@ class Handler(BaseHTTPRequestHandler):
                 "output_dir": OUTPUT_DIR,
                 "review_enabled": library is not None,
                 "review_error": LIBRARY_ERR,
+                "discdb": library.discdb_status() if library else {"available": False},
             })
             return
 
@@ -590,6 +591,10 @@ class Handler(BaseHTTPRequestHandler):
                         "ix": int(t.get("ix")),
                         "name": (t.get("name") or "").strip()[:120] or "Featurette",
                         "include": bool(t.get("include")),
+                        # Which Plex extras folder this one belongs in. Validated
+                        # against the known set in library before it is used as
+                        # a path component.
+                        "subdir": (t.get("subdir") or "").strip()[:40],
                     })
                 except (TypeError, ValueError):
                     continue
@@ -621,6 +626,56 @@ class Handler(BaseHTTPRequestHandler):
                              "movie": {"title": movie.get("title"),
                                        "year": movie.get("year"),
                                        "path": movie.get("path")}})
+            return
+
+        # Prepare a TheDiscDb submission for a disc it does not know about.
+        # Writes files only; submitting them is a deliberate human act.
+        if path == "/api/review/contribute":
+            if not library:
+                self._send(503, {"error": "review unavailable"})
+                return
+            target = self._resolve(payload.get("rel"), want="file")
+            if not target:
+                self._send(404, {"error": "no such ISO"})
+                return
+            movie = payload.get("movie") or {}
+            if not (movie.get("title") and movie.get("tmdbId")):
+                self._send(400, {"error": "pick the film first"})
+                return
+            extras = []
+            for t in (payload.get("extras") or [])[:64]:
+                try:
+                    extras.append({
+                        "ix": int(t.get("ix")),
+                        "seconds": float(t.get("seconds") or 0),
+                        "name": (t.get("name") or "").strip()[:120],
+                        "subdir": (t.get("subdir") or "").strip()[:40],
+                        "include": bool(t.get("include")),
+                    })
+                except (TypeError, ValueError):
+                    continue
+            try:
+                result = library.contribute(
+                    target, movie, extras,
+                    feature_ix=payload.get("featureIx"),
+                    feature_seconds=payload.get("featureSeconds"),
+                    release_title=(payload.get("releaseTitle") or "").strip()[:120] or None,
+                    release_year=payload.get("releaseYear"))
+            except (ValueError, Exception) as e:         # noqa: BLE001
+                self._send(400, {"error": str(e) or "could not prepare submission"})
+                return
+            self._send(200, {"ok": True, **result})
+            return
+
+        # Refresh the TheDiscDb catalogue. Network-bound and slow the first
+        # time (~290 MB), so it runs on a thread and reports through the same
+        # job channel the imports use.
+        if path == "/api/review/discdb-sync":
+            if not library:
+                self._send(503, {"error": "review unavailable"})
+                return
+            job_id = library.start_discdb_sync()
+            self._send(200, {"ok": True, "job": job_id})
             return
 
         # Park a disc so it stops showing up as needing attention.

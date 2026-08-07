@@ -63,6 +63,71 @@ TMDB's search has no such tolerance — it returns nothing for
 prefilled with the label and the spaces have to be put back by hand. No
 heuristic reliably guesses word breaks, so the UI asks instead of pretending.
 
+## Real names, from TheDiscDb
+
+A DVD title is a number and a duration. The names printed on the box exist
+nowhere on the disc in machine-readable form, so left alone this tool can only
+call them *Featurette 01*. [TheDiscDb](https://thediscdb.com) is a community
+catalogue of exactly that missing information, MIT-licensed at
+[github.com/TheDiscDb/data](https://github.com/TheDiscDb/data).
+
+Download it once from the **Disc catalogue** panel (or `discdb sync`). It keeps
+a blobless sparse checkout — ~290 MB rather than the full 2.1 GB, since the
+cover art and MakeMKV logs are not needed — and condenses it to a ~335 KB index
+of the 574 DVDs that carry named titles.
+
+When a disc matches, its extras arrive already named **and already categorised**,
+so deleted scenes land in `Deleted Scenes/` and trailers in `Trailers/` rather
+than everything being swept into `Featurettes/`.
+
+### Identification is exact, not fuzzy
+
+TheDiscDb keys every disc on a `ContentHash` that is simply an MD5 over the
+sizes of the files in `VIDEO_TS`, sorted by name:
+
+```
+md5( int64le(size) for each file in sorted(VIDEO_TS) )
+```
+
+That is reproducible from a ripped ISO with no disc in the drive, and it is the
+disc's own filesystem talking — two rips of the same pressing agree, two
+different pressings do not. Before relying on it, the algorithm was checked
+against every catalogued disc that ships its file listing: **3639 of 3644
+reproduced exactly, including 378 of 378 DVDs.** The five misses are all
+Blu-ray/UHD, and two of them are Game of Thrones discs 29 and 30, whose stored
+hashes are simply swapped — a data-entry slip, not an algorithm one.
+
+A duration-fingerprint fallback exists for discs whose files were altered in
+transit. It is labelled a guess in the UI, because it is one.
+
+Names are mapped onto titles by **runtime, assigned globally best-fit first** —
+not by title number, since lsdvd and MakeMKV number discs differently, and not
+in scan order, since a 60-second menu loop sitting beside a 61-second featurette
+will otherwise steal its name.
+
+### Coverage, and contributing back
+
+TheDiscDb is Blu-ray-first: 574 DVDs against thousands of Blu-rays. Most discs
+will miss, and a miss is not a failure — it is the case for filling the gap.
+
+When a disc is not in the catalogue, **Contribute names to TheDiscDb** writes a
+submission in the project's own layout under
+`/output/.discdb/submissions/data/movie/…`:
+
+```
+Bend It Like Beckham (2002)/
+├── metadata.json
+└── 2003-dvd/
+    ├── release.json
+    ├── disc01.json          <- ContentHash + named, typed titles
+    └── disc01-files.txt     <- the file sizes the hash was taken over
+```
+
+Fork the data repo, copy that `data/` tree in, open a pull request. The export
+refuses to run while the extras are still called *Featurette 01* — the value
+being contributed is the names, and a wrong name in a shared catalogue is worse
+than a gap.
+
 ## Two steps from the CLI, because DVD titles have no names
 
 A DVD title is a number and a duration. Nothing on the disc says which one is

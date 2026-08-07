@@ -47,6 +47,7 @@ RUN set -eux; \
         libdvdread8 \
         lsdvd \
         handbrake-cli \
+        git \
         eject \
         util-linux \
         procps \
@@ -79,9 +80,11 @@ COPY scripts/identify-album.py /opt/isohungry/identify-album.py
 # Installed as an importable module so the web UI can reuse the disc scanning
 # and Radarr matching, with the CLI as a symlink onto the same file.
 COPY scripts/extras-import.py /opt/isohungry/extras_import.py
-RUN ln -sf /opt/isohungry/extras_import.py /usr/local/bin/extras-import
+COPY scripts/discdb.py /opt/isohungry/discdb.py
+RUN ln -sf /opt/isohungry/extras_import.py /usr/local/bin/extras-import \
+ && ln -sf /opt/isohungry/discdb.py /usr/local/bin/discdb
 RUN chmod +x /usr/local/bin/isohungry /usr/local/bin/entrypoint \
-             /opt/isohungry/extras_import.py \
+             /opt/isohungry/extras_import.py /opt/isohungry/discdb.py \
              /opt/isohungry/retag-music.sh /opt/isohungry/identify-album.py
 
 # C.UTF-8 makes bash count characters rather than bytes, so the status line

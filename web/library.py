@@ -34,6 +34,11 @@ import urllib.request
 
 import extras_import as ei
 
+try:
+    import discdb
+except Exception:                                        # noqa: BLE001
+    discdb = None
+
 OUTPUT_DIR = os.environ.get("BASE_OUTPUT_DIR", "/output")
 REVIEW_DIR = os.path.join(OUTPUT_DIR, ".review")
 
@@ -115,6 +120,29 @@ def _movie_brief(m, score=None, in_library=True):
     return out
 
 
+def lookup_discdb(iso_path, titles):
+    """Ask TheDiscDb what this disc actually is. Never fatal.
+
+    Identification is by a hash of the VIDEO_TS file sizes, so a hit is the
+    same physical pressing rather than a film with a similar name.
+    """
+    if not discdb:
+        return None
+    try:
+        entry, how, conf = discdb.match_disc(
+            iso_path, [t["seconds"] for t in titles])
+        if not entry:
+            return {"matched": False, "reason": how}
+        return {
+            "matched": True, "how": how, "confidence": conf,
+            "movie": entry.get("movie"), "year": entry.get("year"),
+            "tmdb": entry.get("tmdb"), "release": entry.get("release"),
+            "names": discdb.name_titles(entry, titles),
+        }
+    except Exception as e:                               # noqa: BLE001
+        return {"matched": False, "reason": "lookup failed: %s" % e}
+
+
 def inspect_iso(iso_path):
     """Read the disc's titles and propose a film, without writing anything."""
     titles = ei.lsdvd_titles(iso_path)
@@ -123,9 +151,33 @@ def inspect_iso(iso_path):
 
     feature, extras, skipped = ei.classify(titles)
     guess = ei.guess_name_from_iso(iso_path)
+    disc = lookup_discdb(iso_path, titles)
 
     suggestion, candidates = None, []
-    if guess:
+
+    # An exact disc match names the film outright. A hash hit is the same
+    # physical pressing, which beats any amount of string similarity against a
+    # squashed volume label, so it wins over the guess-from-filename path.
+    if disc and disc.get("matched") and disc.get("tmdb"):
+        try:
+            want_tmdb = int(disc["tmdb"])
+        except (TypeError, ValueError):
+            want_tmdb = None
+        if want_tmdb:
+            for m in ei.radarr_get("movie"):
+                if m.get("tmdbId") == want_tmdb:
+                    suggestion = _movie_brief(m, 1.0)
+                    break
+            if not suggestion:
+                for m in search_tmdb("%s %s" % (disc.get("movie") or "",
+                                                disc.get("year") or "")):
+                    if m["tmdbId"] == want_tmdb:
+                        suggestion = m
+                        break
+            if suggestion:
+                candidates = [suggestion]
+
+    if guess and not suggestion:
         want, year = ei.parse_query(guess)
         if want:
             ranked = ei.rank_movies(want, ei.radarr_get("movie"), year)
@@ -148,27 +200,40 @@ def inspect_iso(iso_path):
                     candidates.append(m)
                     seen.add(m["tmdbId"])
 
+    # Names from the catalogue where it has them, placeholders everywhere else.
+    # A catalogued name also carries its category, so deleted scenes land in
+    # Deleted Scenes rather than all extras being swept into Featurettes.
+    named = (disc or {}).get("names") or {}
+    extra_rows = []
+    for n, t in enumerate(extras, 1):
+        info = named.get(t["ix"])
+        row = {
+            "ix": t["ix"],
+            "duration": ei.human_duration(t["seconds"]),
+            "seconds": t["seconds"],
+            "chapters": t["chapters"],
+            "include": True,
+            "name": "Featurette %02d (%s)" % (n, ei.human_duration(t["seconds"])),
+            "subdir": ei.EXTRAS_SUBDIR,
+            "source": "placeholder",
+        }
+        if info and not info.get("is_feature"):
+            row.update(name=info["name"], subdir=info["subdir"],
+                       source="thediscdb", discdb_type=info["type"])
+        extra_rows.append(row)
+
     return {
         "iso": iso_path,
         "guess": guess,
         "suggestion": suggestion,
         "candidates": candidates,
+        "discdb": disc,
         "feature": {
             "ix": feature["ix"],
             "duration": ei.human_duration(feature["seconds"]),
             "seconds": feature["seconds"],
         },
-        "extras": [
-            {
-                "ix": t["ix"],
-                "duration": ei.human_duration(t["seconds"]),
-                "seconds": t["seconds"],
-                "chapters": t["chapters"],
-                "include": True,
-                "name": "Featurette %02d (%s)" % (n, ei.human_duration(t["seconds"])),
-            }
-            for n, t in enumerate(extras, 1)
-        ],
+        "extras": extra_rows,
         "skipped": [
             {"ix": t["ix"], "duration": ei.human_duration(t["seconds"]),
              "reason": t["reason"]}
@@ -307,7 +372,6 @@ def _run_import(job_id, iso_path, movie, extras, include_feature, feature_ix,
         except (PermissionError, OSError):
             pass
 
-        extras_dir = os.path.join(movie_path, ei.EXTRAS_SUBDIR)
         encoder = ei.pick_encoder()
 
         work = []
@@ -320,8 +384,13 @@ def _run_import(job_id, iso_path, movie, extras, include_feature, feature_ix,
         for t in extras:
             if not t.get("include"):
                 continue
+            # Each extra carries its own Plex folder: TheDiscDb knows a deleted
+            # scene from a featurette, and Plex presents them differently.
+            subdir = t.get("subdir") or ei.EXTRAS_SUBDIR
+            if subdir not in ei.PLEX_EXTRA_DIRS:
+                subdir = ei.EXTRAS_SUBDIR
             work.append((t["ix"], os.path.join(
-                extras_dir, ei.safe_filename(t["name"]) + ".mkv"), False))
+                movie_path, subdir, ei.safe_filename(t["name"]) + ".mkv"), False))
 
         _set(job_id, status="running", total=len(work), done=0,
              encoder=encoder, movie=movie, log=[])
@@ -375,6 +444,91 @@ def _run_import(job_id, iso_path, movie, extras, include_feature, feature_ix,
 def _append_log(job_id, line):
     with _jobs_lock:
         _jobs.setdefault(job_id, {}).setdefault("log", []).append(line)
+
+
+def contribute(iso_path, movie, extras, feature_ix=None, feature_seconds=None,
+               release_title=None, release_year=None):
+    """Prepare a TheDiscDb submission for a disc the catalogue does not have.
+
+    Only worth doing once a human has named the extras: the value being
+    contributed *is* the names, and "Featurette 01" helps nobody.
+    """
+    if not discdb:
+        raise ValueError("TheDiscDb support is unavailable")
+
+    named = [t for t in extras if t.get("include") and t.get("name")
+             and not re.match(r"^Featurette \d+", t["name"] or "")]
+    if not named:
+        raise ValueError("name the extras first — a submission of "
+                         "'Featurette 01' is worse than no submission")
+
+    titles = [{"ix": t["ix"], "seconds": t["seconds"], "name": t["name"],
+               "discdb_type": _plex_to_discdb(t.get("subdir"))}
+              for t in named]
+    if feature_ix is not None:
+        titles.insert(0, {"ix": feature_ix, "seconds": feature_seconds,
+                          "name": movie["title"], "discdb_type": "MainMovie"})
+
+    out_dir = os.path.join(OUTPUT_DIR, ".discdb", "submissions")
+    result = discdb.export_contribution(
+        iso_path,
+        {"title": movie["title"], "year": movie["year"],
+         "tmdbId": movie["tmdbId"]},
+        titles, out_dir, release_title, release_year)
+
+    review = load_review(iso_path)
+    review["contributed"] = {"at": time.time(), "dir": result["release_dir"],
+                             "content_hash": result["content_hash"]}
+    save_review(iso_path, review)
+    return result
+
+
+# The reverse of discdb.TYPE_TO_PLEX. Several of their types collapse onto one
+# Plex folder, so this picks the type a contributor would most likely mean.
+_PLEX_TO_DISCDB = {
+    "Featurettes": "Featurette",
+    "Behind The Scenes": "Featurette",
+    "Deleted Scenes": "DeletedScene",
+    "Trailers": "Trailer",
+    "Interviews": "Interview",
+    "Scenes": "Scene",
+    "Shorts": "Short",
+    "Other": "Other",
+}
+
+
+def _plex_to_discdb(subdir):
+    return _PLEX_TO_DISCDB.get(subdir or "", "Extra")
+
+
+def discdb_status():
+    """What the local catalogue knows, for the UI to show without a lookup."""
+    if not discdb:
+        return {"available": False}
+    index = discdb.load_index()
+    if not index:
+        return {"available": True, "synced": False}
+    return {"available": True, "synced": True,
+            "discs": index.get("count", 0), "built": index.get("built")}
+
+
+def start_discdb_sync():
+    job_id = "discdb-%d" % (time.time() * 1000)
+    _set(job_id, status="running", total=1, done=0,
+         current="fetching TheDiscDb", log=[])
+
+    def run():
+        try:
+            index = discdb.sync()
+            _append_log(job_id, "indexed %d discs" % index.get("count", 0))
+            _set(job_id, status="done", done=1, current="",
+                 finished=time.time())
+        except Exception as e:                           # noqa: BLE001
+            _append_log(job_id, "FAILED: %s" % e)
+            _set(job_id, status="failed", error=str(e), finished=time.time())
+
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
 
 
 def start_import(iso_path, tmdb_id, extras, include_feature=False,
