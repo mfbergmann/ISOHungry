@@ -125,3 +125,17 @@ COVER_PROMPT = (
 def read_cover(image_path, timeout=None):
     """The special-features list from a photo of a case back."""
     return ask_json_list(image_path, COVER_PROMPT, timeout=timeout)
+
+
+MENU_PROMPT = (
+    "This is a DVD menu screen. List ONLY the selectable menu items that play "
+    "video content. Exclude navigation buttons (Main Menu, Back, More, Next, "
+    "Previous, Resume, Play, Setup, Languages, Scene Selection). Copy each "
+    "label exactly as shown, in the order they appear top to bottom. "
+    "Reply with a JSON array of strings and nothing else."
+)
+
+
+def read_menu(image_path, timeout=None):
+    """The playable items on a DVD menu screen, in reading order."""
+    return ask_json_list(image_path, MENU_PROMPT, timeout=timeout)

@@ -29,6 +29,11 @@ import subprocess
 import sys
 import tempfile
 
+try:
+    import vision
+except Exception:                                        # noqa: BLE001
+    vision = None
+
 SECTOR = 2048
 
 # PCI packet layout (libdvdread nav_types.h), offsets within the PCI payload:
@@ -72,6 +77,15 @@ MAX_LABEL_CHARS = 48
 # A _score at or above this reads like a real title — two or three clean words.
 # Reaching it stops the search for a better rendering of the same button.
 GOOD_ENOUGH = 18
+
+
+MENU_PROMPT = (
+    "This is a DVD menu screen. List ONLY the selectable menu items that play "
+    "video content. Exclude navigation buttons (Main Menu, Back, More, Next, "
+    "Previous, Resume, Play, Setup, Languages, Scene Selection). Copy each "
+    "label exactly as shown, in the order they appear top to bottom. "
+    "Reply with a JSON array of strings and nothing else."
+)
 
 
 class MenuError(Exception):
@@ -223,6 +237,59 @@ _SHORT_OK = {"an", "the", "of", "to", "in", "on", "at", "and", "or", "is", "it",
              "cd", "dvd", "bts", "ng"}
 
 
+def _use_vision():
+    return bool(vision and vision.available())
+
+
+def _read_menu_vision(frame, buttons):
+    """Label a menu in one pass with a vision model.
+
+    Cropping each button and OCRing it separately exists because tesseract
+    cannot be told what a menu is. A vision model can: it reads the whole
+    screen, keeps the labels intact, and leaves out the navigation buttons
+    because it was asked to. On a real special-features menu it returned four
+    of four labels exactly, where per-button tesseract returned two clean and
+    two garbled.
+
+    The button table is still what makes the result useful — the model sees
+    names, not which title each one plays. Labels come back in reading order,
+    so they pair with the content buttons sorted the same way.
+    """
+    try:
+        labels = vision.read_menu(frame)
+    except Exception:                                    # noqa: BLE001
+        return []
+    if not labels:
+        return []
+
+    ordered = sorted(buttons, key=lambda b: (b["rect"][1], b["rect"][0]))
+    items = []
+    for i, label in enumerate(labels):
+        label = _clean(label)
+        if not label or CHROME.match(label):
+            continue
+        button = ordered[i] if i < len(ordered) else None
+        kind, target = describe_cmd(button["cmd"]) if button else ("Vision", None)
+        reg_val = setlink_register(button["cmd"]) if button else None
+        items.append({
+            "button": button["n"] if button else 0,
+            "label": label,
+            # A vision read is not a per-button crop, so there is no OCR score
+            # to report; the confidence lives in which model produced it.
+            "score": 100, "kind": kind, "target": target,
+            "rect": button["rect"] if button else (0, 0, 0, 0),
+            "reg": reg_val[0] if reg_val else None,
+            "val": reg_val[1] if reg_val else None,
+            "cmd": button["cmd"].hex() if button else "",
+            "source": "vision",
+            # Fewer labels than buttons is normal (navigation excluded); more
+            # means the pairing has slipped and the caller should not trust the
+            # title mapping.
+            "aligned": len(labels) <= len(ordered),
+        })
+    return items
+
+
 def _score(text):
     """How much this reads like a title rather than OCR noise.
 
@@ -353,9 +420,22 @@ def scan(iso_path, work_dir=None, want_frames=3, skip_chapters=True):
                     read_buttons.add((b["cmd"], b["rect"]))
 
                 frames = render_frames(vob, menu["sector"], work_dir,
-                                       count=want_frames)
+                                       count=1 if _use_vision() else want_frames)
                 if not frames:
                     continue
+
+                if _use_vision():
+                    items = _read_menu_vision(frames[0], content)
+                    for f in frames:
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
+                    if items:
+                        results.append({"vob": name, "sector": menu["sector"],
+                                        "items": items})
+                    continue
+
                 items = []
                 for b in content:
                     label, score = ocr_button(
