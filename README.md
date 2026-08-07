@@ -431,6 +431,7 @@ Delete the `kernel=` line from `%USERPROFILE%\.wslconfig` and run
 | `scripts/attach-drives.ps1` | Per-boot USB attach/detach |
 | `scripts/retag-music.sh` | Retro-tags albums ripped before tagging worked |
 | `scripts/identify-album.py` | Identifies an album MusicBrainz missed at rip time |
+| `scripts/extras-import.py` | Fork addition — imports DVD special features into Plex extras folders ([docs](docs/EXTRAS.md)) |
 | `kernel/build-wsl-kernel.sh` | Reproducible WSL2 kernel build |
 
 Commercial DVDs are CSS-scrambled; libdvdcss is built from VideoLAN source in

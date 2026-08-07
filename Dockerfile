@@ -45,6 +45,8 @@ RUN set -eux; \
         dvdbackup \
         genisoimage \
         libdvdread8 \
+        lsdvd \
+        handbrake-cli \
         eject \
         util-linux \
         procps \
@@ -74,7 +76,9 @@ COPY entrypoint.sh /usr/local/bin/entrypoint
 COPY web/ /opt/isohungry/
 COPY scripts/retag-music.sh /opt/isohungry/retag-music.sh
 COPY scripts/identify-album.py /opt/isohungry/identify-album.py
+COPY scripts/extras-import.py /usr/local/bin/extras-import
 RUN chmod +x /usr/local/bin/isohungry /usr/local/bin/entrypoint \
+             /usr/local/bin/extras-import \
              /opt/isohungry/retag-music.sh /opt/isohungry/identify-album.py
 
 # C.UTF-8 makes bash count characters rather than bytes, so the status line
