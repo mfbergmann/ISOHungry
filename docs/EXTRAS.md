@@ -97,6 +97,25 @@ reproduced exactly, including 378 of 378 DVDs.** The five misses are all
 Blu-ray/UHD, and two of them are Game of Thrones discs 29 and 30, whose stored
 hashes are simply swapped — a data-entry slip, not an algorithm one.
 
+This was then confirmed the only way that really counts — against a disc rather
+than against their data. The same disc was hashed twice, once as the physical
+pressing in the drive and once as the ISO ripped from it:
+
+```
+physical disc : 1AF28D5294862E6BEA1D17F4BE2BD9D2  (28 VIDEO_TS files)
+ripped ISO    : 1AF28D5294862E6BEA1D17F4BE2BD9D2  (28 VIDEO_TS files)
+```
+
+Identical. `dvdbackup` and `genisoimage` preserve VIDEO_TS file sizes exactly,
+so a rip hashes as its pressing does. That is the assumption the whole
+exact-match design rests on, and it holds.
+
+The corollary matters when a lookup misses: a hash that does not match the
+catalogue means a *different pressing*, not a broken hash. A Requiem for a Dream
+special edition here missed its catalogued entry, and the entry's own data
+agreed — 6054s of feature against 6064s, and four trailers against eleven
+extras. Different disc, correctly refused.
+
 A duration-fingerprint fallback exists for discs whose files were altered in
 transit. It is labelled a guess in the UI, because it is one.
 
