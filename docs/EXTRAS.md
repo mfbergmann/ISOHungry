@@ -139,10 +139,24 @@ Bend It Like Beckham (2002)/
 └── 2003-dvd/
     ├── release.json
     ├── disc01.json          <- ContentHash + named, typed titles
-    └── disc01-files.txt     <- the file sizes the hash was taken over
+    ├── disc01-summary.txt   <- the file their CI validates
+    └── disc01.txt           <- HSH lines, so the hash can be recomputed
 ```
 
-Fork the data repo, copy that `data/` tree in, open a pull request. The export
+The layout is shaped by what their CI actually checks
+(`housekeeping/appliances/check-summaries.ts`): chunks separated by blank lines,
+`Name` and `Type` mandatory, `Type` from their fixed list, numeric fields as
+integers, and `File name` **last** in its chunk — the validator checks that
+exact position. `Comment` and `Segment map` are MakeMKV artefacts we cannot
+produce, and the validator treats them as optional.
+
+`disc01.txt` carries `HSH:` lines in MakeMKV log format because that is what
+their importer reads to derive `ContentHash`. A reviewer can therefore recompute
+the hash from the submission rather than trusting the number in the JSON.
+
+Contributions are merged pull requests against
+[TheDiscDb/data](https://github.com/TheDiscDb/data), credited to the contributor
+in the commit message. Fork it, copy that `data/` tree in, open a pull request. The export
 refuses to run while the extras are still called *Featurette 01* — the value
 being contributed is the names, and a wrong name in a shared catalogue is worse
 than a gap.
