@@ -56,7 +56,17 @@ CHROME = re.compile(
     r"^\W*(main\s*menu|resume|resume\s*film|back|more|next|previous|prev|play|"
     r"play\s*(all|movie|film)|scene\s*selection|special\s*features|setup|"
     r"languages?|language\s*selection|subtitles?|audio|top\s*menu|title\s*menu|"
-    r"chapters?)\W*$", re.I)
+    r"chapters?|"
+    # Setup and language menus are all buttons and no content. Their options
+    # read as short confident words, which is exactly what survives OCR, so
+    # without this they crowd out the real names.
+    r"yes|no|on|off|stop|done|exit|return|cancel|ok|"
+    r"english|spanish|french|german|italian|portuguese|espa\w*ol|fran\w*ais|"
+    r"deutsch|italiano|commentary|stereo|surround|5\.?1|2\.?0|dolby\s*\w*|dts|"
+    r"widescreen|full\s*screen|fullscreen|trailers?)\W*$", re.I)
+
+# Beyond this a "label" is a paragraph of OCR debris, not a menu item.
+MAX_LABEL_CHARS = 48
 
 
 # A _score at or above this reads like a real title — two or three clean words.
@@ -188,17 +198,48 @@ def render_frames(vob_path, sector, out_dir, count=4):
     return frames
 
 
+# Short tokens that are real words rather than OCR debris.
+_SHORT_OK = {"an", "the", "of", "to", "in", "on", "at", "and", "or", "is", "it",
+             "my", "no", "up", "ii", "iii", "iv", "vi", "tv", "us", "uk", "hd",
+             "cd", "dvd", "bts", "ng"}
+
+
 def _score(text):
-    """How much this reads like a title rather than OCR noise."""
+    """How much this reads like a title rather than OCR noise.
+
+    Counts words rather than characters. Rewarding length was actively wrong:
+    "Deleted Scenes Pa Le ~" scored higher than "Deleted Scenes", so the
+    noisiest rendering of a button won over the clean one every time.
+    """
     if not text:
         return -1
-    letters = sum(c.isalpha() for c in text)
-    junk = sum(1 for c in text if not (c.isalnum() or c in " '&#!?,.:-—’()/"))
-    words = [w for w in re.split(r"\s+", text) if len(w) > 1]
-    if letters < 3:
+    good = bad = 0
+    for token in text.split():
+        core = token.strip(".,:;!?'\"()&-–—’")
+        if not core:
+            bad += 1
+        elif re.fullmatch(r"#\d{1,3}", core):        # "#1", "#2" — part numbers
+            good += 1
+        elif re.fullmatch(r"\d{1,4}", core):         # bare numbers say nothing
+            continue
+        elif len(core) == 1:
+            bad += 1                                 # stray letters are debris
+        elif core.lower() in _SHORT_OK:
+            good += 1
+        else:
+            alpha = sum(c.isalpha() for c in core)
+            # A word, allowing one stray non-letter inside it.
+            good += 1 if (alpha >= 3 and alpha >= len(core) - 1) else 0
+            bad += 0 if (alpha >= 3 and alpha >= len(core) - 1) else 1
+    if good == 0:
         return -1
-    # Long runs of real words score well; stray punctuation is penalised hard.
-    return letters + 3 * len(words) - 5 * junk - max(0, len(text) - 60)
+    junk = sum(1 for c in text if not (c.isalnum() or c in " '&#!?,.:-—’()/"))
+    return 4 * good - 3 * bad - 2 * junk
+
+
+# Below this a label is more OCR debris than title, and the extra keeps its
+# placeholder name instead. One clean word with no junk scores 4.
+MIN_LABEL_SCORE = 4
 
 
 def _clean(text):
@@ -302,7 +343,9 @@ def scan(iso_path, work_dir=None, want_frames=3, skip_chapters=True):
                         frames, b["rect"], work_dir,
                         "%s_%d_%d" % (name, menu["sector"], b["n"]))
                     kind, target = describe_cmd(b["cmd"])
-                    if not label or CHROME.match(label):
+                    if (not label or score < MIN_LABEL_SCORE
+                            or len(label) > MAX_LABEL_CHARS
+                            or CHROME.match(label)):
                         continue
                     items.append({"button": b["n"], "label": label,
                                   "score": score, "kind": kind,
