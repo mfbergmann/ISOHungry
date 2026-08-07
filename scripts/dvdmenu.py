@@ -139,6 +139,22 @@ def describe_cmd(cmd):
     return "cmd%02x" % cmd[0], None
 
 
+def setlink_register(cmd):
+    """(register, value) for a set-a-register-then-link button, else None.
+
+    Extras menus almost never jump straight to a title. They stash *which*
+    extra was chosen in a general-purpose register and link to a dispatcher
+    that reads it. The register number is what makes these buttons
+    identifiable: a disc uses one register for its extras and different ones
+    for audio, subtitle and setup menus, so the register separates content
+    buttons from menu furniture structurally rather than by guessing at OCR
+    text. The value is the disc's own ordering of its extras.
+    """
+    if cmd[0] != CMD_SETLINK:
+        return None
+    return (cmd[2] << 8) | cmd[3], (cmd[4] << 8) | cmd[5]
+
+
 # ------------------------------------------------------------------- the disc
 
 def list_menu_vobs(iso_path):
@@ -347,9 +363,12 @@ def scan(iso_path, work_dir=None, want_frames=3, skip_chapters=True):
                             or len(label) > MAX_LABEL_CHARS
                             or CHROME.match(label)):
                         continue
+                    reg_val = setlink_register(b["cmd"])
                     items.append({"button": b["n"], "label": label,
                                   "score": score, "kind": kind,
                                   "target": target, "rect": b["rect"],
+                                  "reg": reg_val[0] if reg_val else None,
+                                  "val": reg_val[1] if reg_val else None,
                                   "cmd": b["cmd"].hex()})
                 for f in frames:
                     try:
@@ -372,18 +391,41 @@ def menu_names(iso_path, menus=None, **kw):
     extras in and — usually, not always — the order of their title numbers.
     Deduplicated, because paged menus repeat their neighbours.
     """
-    names, seen = [], set()
-    for menu in (menus if menus is not None else scan(iso_path, **kw)):
+    menus = menus if menus is not None else scan(iso_path, **kw)
+
+    candidates = []
+    for menu in menus:
         # Scene-selection pages are chapter jumps into the feature; they name
         # chapters, not extras.
         if all(i["kind"] == "JumpVTS_PTT" for i in menu["items"]):
             continue
-        for item in menu["items"]:
-            key = item["label"].lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            names.append(item)
+        candidates.extend(menu["items"])
+
+    # Keep only the register the disc uses for its extras — the one most of
+    # its content buttons write to. Language, audio and setup menus write to
+    # different registers, and their options ("YES", "STOP", "Spanish") are
+    # short confident words that survive OCR beautifully and would otherwise
+    # crowd out the real names and wreck the ordering.
+    registers = {}
+    for item in candidates:
+        if item.get("reg") is not None:
+            registers.setdefault(item["reg"], []).append(item)
+    if registers:
+        best_reg = max(registers, key=lambda r: len(registers[r]))
+        chosen = registers[best_reg]
+        # The register's value is the disc's own index for that extra, which
+        # is a better order than the order the menus happened to be scanned in.
+        chosen.sort(key=lambda i: i["val"])
+    else:
+        chosen = candidates
+
+    names, seen = [], set()
+    for item in chosen:
+        key = item["label"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(item)
     return names
 
 
