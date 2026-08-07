@@ -68,7 +68,12 @@ CHROME = re.compile(
     r"yes|no|on|off|stop|done|exit|return|cancel|ok|"
     r"english|spanish|french|german|italian|portuguese|espa\w*ol|fran\w*ais|"
     r"deutsch|italiano|commentary|stereo|surround|5\.?1|2\.?0|dolby\s*\w*|dts|"
-    r"widescreen|full\s*screen|fullscreen|trailers?)\W*$", re.I)
+    r"widescreen|full\s*screen|fullscreen|trailers?|"
+    # Headings and text screens, not playable items.
+    r"bonus\s+(features?|materials?)|special\s+features?|extras?|"
+    r"cast\s*(&|and)\s*crew|filmograph(y|ies)|biograph(y|ies)|"
+    r"production\s+notes|liner\s+notes|credits|"
+    r"chapters?\s*\d+\s*[-–]\s*\d+|chapters?\s*\d+)\W*$", re.I)
 
 # Beyond this a "label" is a paragraph of OCR debris, not a menu item.
 MAX_LABEL_CHARS = 48
@@ -268,19 +273,25 @@ def _read_menu_vision(frame, buttons):
         label = _clean(label)
         if not label or CHROME.match(label):
             continue
-        button = ordered[i] if i < len(ordered) else None
-        kind, target = describe_cmd(button["cmd"]) if button else ("Vision", None)
-        reg_val = setlink_register(button["cmd"]) if button else None
+        if i >= len(ordered):
+            # More labels than buttons: the model is reading a text screen -
+            # a filmography, a cast list, liner notes - not a set of playable
+            # items. Whatever it found there has no title to play, so it is
+            # dropped rather than offered as an extra.
+            break
+        button = ordered[i]
+        kind, target = describe_cmd(button["cmd"])
+        reg_val = setlink_register(button["cmd"])
         items.append({
-            "button": button["n"] if button else 0,
+            "button": button["n"],
             "label": label,
             # A vision read is not a per-button crop, so there is no OCR score
             # to report; the confidence lives in which model produced it.
             "score": 100, "kind": kind, "target": target,
-            "rect": button["rect"] if button else (0, 0, 0, 0),
+            "rect": button["rect"],
             "reg": reg_val[0] if reg_val else None,
             "val": reg_val[1] if reg_val else None,
-            "cmd": button["cmd"].hex() if button else "",
+            "cmd": button["cmd"].hex(),
             "source": "vision",
             # Fewer labels than buttons is normal (navigation excluded); more
             # means the pairing has slipped and the caller should not trust the
