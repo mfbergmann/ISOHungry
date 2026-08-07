@@ -70,6 +70,14 @@ OWNER_UID = int(os.environ.get("EXTRAS_UID", "99"))
 OWNER_GID = int(os.environ.get("EXTRAS_GID", "100"))
 
 
+class LsdvdError(Exception):
+    """Reading the disc failed.
+
+    A real exception rather than die(): this module is imported by the web UI,
+    where sys.exit() would surface to the browser as the string "1".
+    """
+
+
 def log(msg):
     print(msg, flush=True)
 
@@ -88,29 +96,37 @@ def lsdvd_titles(iso_path):
     need to be mounted or even still be in the drive.
     """
     if not shutil.which("lsdvd"):
-        die("lsdvd not installed in this image")
+        raise LsdvdError("lsdvd not installed in this image")
     try:
+        # -x adds the per-chapter detail; safe now that the ampersand escaping
+        # below handles the unescaped fields it also brings in.
         out = subprocess.run(
             ["lsdvd", "-Ox", "-x", iso_path],
             capture_output=True, timeout=300,
         )
     except subprocess.TimeoutExpired:
-        die(f"lsdvd timed out reading {iso_path}")
+        raise LsdvdError("lsdvd timed out reading %s" % os.path.basename(iso_path))
 
     # lsdvd writes libdvdread chatter to stdout ahead of the XML, and emits
     # raw high bytes in the disc title that break a strict UTF-8 parse.
     text = out.stdout.decode("utf-8", "replace")
     start = text.find("<lsdvd>")
     if start == -1:
-        die(f"no DVD structure found in {iso_path}\n{out.stderr.decode('utf-8', 'replace')[:500]}")
+        raise LsdvdError("no DVD structure found in %s — is it a video DVD? %s"
+                         % (os.path.basename(iso_path),
+                            out.stderr.decode("utf-8", "replace")[:300]))
     # Strip control characters that libdvdread copies verbatim out of the disc
     # header; ElementTree rejects them outright.
     xml = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text[start:])
+    # lsdvd does not escape its own output: a disc whose aspect field reads
+    # "Pan&Scan" emits a bare ampersand and the whole document fails to parse.
+    # Escape any & that is not already the start of an entity reference.
+    xml = re.sub(r"&(?!(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#x[0-9A-Fa-f]+);)", "&amp;", xml)
 
     try:
         root = ET.fromstring(xml)
     except ET.ParseError as e:
-        die(f"could not parse lsdvd output: {e}")
+        raise LsdvdError("could not parse lsdvd output: %s" % e)
 
     titles = []
     for track in root.findall("track"):
@@ -244,6 +260,61 @@ def guess_name_from_iso(iso_path):
     return " ".join(name.split())
 
 
+def parse_query(query):
+    """Split a search string into (normalized title, year or None).
+
+    A trailing year is a strong signal on its own, so it is scored separately
+    rather than being allowed to dilute the title similarity.
+    """
+    year = None
+    ym = re.search(r"\b(19\d{2}|20\d{2})\b", query or "")
+    if ym:
+        year = int(ym.group(1))
+        query = query.replace(ym.group(1), " ")
+    return normalize(query or ""), year
+
+
+def rank_movies(want, movies, year=None):
+    """Score every movie against a normalized query.
+
+    Returns [(score, shares_word, movie)] best first. `shares_word` records
+    whether a whole word is common to both titles - character similarity alone
+    puts "matrix" and "master" at 0.67, close enough to misfile a disc.
+    """
+    want_tokens = {w for w in want.split() if len(w) >= 3}
+    # ISO9660 volume labels cannot contain spaces, so discs arrive squashed:
+    # BENDITLIKEBECKHAM_4X3. Word-for-word comparison finds nothing in common
+    # with "Bend It Like Beckham", so compare the space-stripped forms too and
+    # treat a candidate's word appearing inside the squashed run as shared.
+    want_flat = want.replace(" ", "")
+    scored = []
+    for m in movies:
+        candidates = [m.get("title", "")] + [
+            a.get("title", "") for a in m.get("alternateTitles", []) or []
+        ]
+        score, shares_word = 0.0, False
+        for c in candidates:
+            if not c:
+                continue
+            norm = normalize(c)
+            score = max(score, SequenceMatcher(None, want, norm).ratio())
+            norm_words = {w for w in norm.split() if len(w) >= 3}
+            if want_tokens & norm_words:
+                shares_word = True
+            norm_flat = norm.replace(" ", "")
+            if norm_flat and len(norm_flat) >= 6:
+                score = max(score, SequenceMatcher(None, want_flat, norm_flat).ratio())
+                # A squashed label counts as sharing a word when the title's
+                # own words are actually present inside it.
+                if len(norm_words) > 1 and all(w in want_flat for w in norm_words):
+                    shares_word = True
+        if year and m.get("year") == year:
+            score = min(1.0, score + 0.15)
+        scored.append((score, shares_word, m))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored
+
+
 def match_movie(query=None, tmdb_id=None, iso_path=None):
     movies = radarr_get("movie")
     if tmdb_id:
@@ -257,38 +328,12 @@ def match_movie(query=None, tmdb_id=None, iso_path=None):
     if not query:
         die("could not derive a title from the ISO name; pass --movie or --tmdb-id")
 
-    # A trailing year in the query is a strong signal, so score it separately
-    # rather than letting it dilute the title similarity.
-    year = None
-    ym = re.search(r"\b(19\d{2}|20\d{2})\b", query)
-    if ym:
-        year = int(ym.group(1))
-        query = query.replace(ym.group(1), " ")
-
-    want = normalize(query)
+    want, year = parse_query(query)
     if not want:
         die(f"nothing searchable in '{query}'")
 
     want_tokens = {w for w in want.split() if len(w) >= 3}
-
-    scored = []
-    for m in movies:
-        candidates = [m.get("title", "")] + [
-            a.get("title", "") for a in m.get("alternateTitles", []) or []
-        ]
-        score, shares_word = 0.0, False
-        for c in candidates:
-            if not c:
-                continue
-            norm = normalize(c)
-            score = max(score, SequenceMatcher(None, want, norm).ratio())
-            if want_tokens & {w for w in norm.split() if len(w) >= 3}:
-                shares_word = True
-        if year and m.get("year") == year:
-            score = min(1.0, score + 0.15)
-        scored.append((score, shares_word, m))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
+    scored = rank_movies(want, movies, year)
     best_score, shares_word, best = scored[0] if scored else (0.0, False, None)
 
     # Character similarity alone is not enough to separate real titles:
@@ -409,7 +454,10 @@ def cmd_scan(args):
         die(f"no such ISO: {iso}")
 
     log(f"Reading titles from {os.path.basename(iso)} ...")
-    titles = lsdvd_titles(iso)
+    try:
+        titles = lsdvd_titles(iso)
+    except LsdvdError as e:
+        die(str(e))
     if not titles:
         die("no titles found - is this a video DVD?")
     feature, extras, skipped = classify(titles)

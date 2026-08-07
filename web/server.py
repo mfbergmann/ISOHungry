@@ -15,9 +15,21 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
+
+# Disc review (fork addition). Optional: without Radarr configured the rest of
+# the UI must still work, so an import failure disables the panel rather than
+# taking the server down with it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import library
+    LIBRARY_ERR = None
+except Exception as _e:                                  # noqa: BLE001
+    library = None
+    LIBRARY_ERR = str(_e)
 
 OUTPUT_DIR  = os.environ.get("BASE_OUTPUT_DIR", "/output")
 STATUS_DIR  = "/tmp/dvd_rip_status"
@@ -351,12 +363,70 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/status":
+            isos = collect_isos()
+            if library:
+                # Movie ISOs carry their review state so the list can show what
+                # is still waiting on a human without a request per disc.
+                for item in isos:
+                    if item["kind"] == "movies":
+                        item["review"] = library.review_status(
+                            os.path.join(OUTPUT_DIR, item["rel"]))
             self._send(200, {
                 "drives": collect_drives(),
-                "isos": collect_isos(),
+                "isos": isos,
                 "free_bytes": free_bytes(),
                 "output_dir": OUTPUT_DIR,
+                "review_enabled": library is not None,
+                "review_error": LIBRARY_ERR,
             })
+            return
+
+        # ---- disc review: identify a ripped disc before importing it -------
+        if path.startswith("/api/review/"):
+            if not library:
+                self._send(503, {"error": "review unavailable: %s" % LIBRARY_ERR})
+                return
+            query = parse_qs(urlparse(self.path).query)
+            action = path[len("/api/review/"):]
+
+            if action == "inspect":
+                target = self._resolve((query.get("rel") or [""])[0], want="file")
+                if not target:
+                    self._send(404, {"error": "no such ISO"})
+                    return
+                try:
+                    result = library.inspect_iso(target)
+                except Exception as e:                   # noqa: BLE001
+                    # SystemExit stringifies to its exit code, so a die() deep
+                    # in the shared CLI module would surface as "1".
+                    msg = str(e) if not isinstance(e, SystemExit) else ""
+                    self._send(400, {"error": msg or "could not read the disc"})
+                    return
+                saved = library.load_review(target)
+                result["saved"] = saved
+                result["rel"] = (query.get("rel") or [""])[0]
+                self._send(200, result)
+                return
+
+            if action == "search":
+                term = (query.get("q") or [""])[0].strip()
+                if len(term) < 2:
+                    self._send(400, {"error": "search for at least two characters"})
+                    return
+                scope = (query.get("scope") or ["both"])[0]
+                out = {"library": [], "tmdb": []}
+                if scope in ("library", "both"):
+                    out["library"] = library.search_library(term)
+                if scope in ("tmdb", "both"):
+                    out["tmdb"] = library.search_tmdb(term)
+                self._send(200, out)
+                return
+
+            if action == "job":
+                self._send(200, library.job((query.get("id") or [""])[0]))
+                return
+
+            self._send(404, {"error": "not found"})
             return
 
         if path == "/api/settings":
@@ -492,6 +562,78 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/identify":
             self._identify(payload)
+            return
+
+        # Confirmed: encode the chosen titles into the film's folder. This is
+        # the only path in the server that writes outside OUTPUT_DIR, and it
+        # only ever writes to a folder Radarr owns.
+        if path == "/api/review/import":
+            if not library:
+                self._send(503, {"error": "review unavailable: %s" % LIBRARY_ERR})
+                return
+            target = self._resolve(payload.get("rel"), want="file")
+            if not target:
+                self._send(404, {"error": "no such ISO"})
+                return
+            try:
+                tmdb_id = int(payload.get("tmdbId") or 0)
+            except (TypeError, ValueError):
+                tmdb_id = 0
+            if not tmdb_id:
+                self._send(400, {"error": "pick a film first"})
+                return
+
+            extras = []
+            for t in (payload.get("extras") or [])[:64]:
+                try:
+                    extras.append({
+                        "ix": int(t.get("ix")),
+                        "name": (t.get("name") or "").strip()[:120] or "Featurette",
+                        "include": bool(t.get("include")),
+                    })
+                except (TypeError, ValueError):
+                    continue
+
+            include_feature = bool(payload.get("includeFeature"))
+            feature_ix = payload.get("featureIx")
+            try:
+                feature_ix = int(feature_ix) if feature_ix is not None else None
+            except (TypeError, ValueError):
+                feature_ix = None
+            if include_feature and feature_ix is None:
+                self._send(400, {"error": "no feature title to import"})
+                return
+            if not include_feature and not any(t["include"] for t in extras):
+                self._send(400, {"error": "nothing selected to import"})
+                return
+
+            try:
+                job_id, movie, created = library.start_import(
+                    target, tmdb_id, extras,
+                    include_feature=include_feature,
+                    feature_ix=feature_ix,
+                    feature_name=(payload.get("featureName") or "").strip()[:160] or None,
+                )
+            except (ValueError, SystemExit) as e:
+                self._send(400, {"error": str(e) or "could not start the import"})
+                return
+            self._send(200, {"ok": True, "job": job_id, "created_movie": created,
+                             "movie": {"title": movie.get("title"),
+                                       "year": movie.get("year"),
+                                       "path": movie.get("path")}})
+            return
+
+        # Park a disc so it stops showing up as needing attention.
+        if path == "/api/review/skip":
+            if not library:
+                self._send(503, {"error": "review unavailable"})
+                return
+            target = self._resolve(payload.get("rel"), want="file")
+            if not target:
+                self._send(404, {"error": "no such ISO"})
+                return
+            library.save_review(target, {"status": "skipped", "at": time.time()})
+            self._send(200, {"ok": True})
             return
 
         # Rename a finished ISO, keeping its fingerprint marker in step so the

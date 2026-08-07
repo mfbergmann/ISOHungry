@@ -26,7 +26,44 @@ a 4K release — and wanting only the featurettes the DVD carries. The feature i
 recorded in the plan with `include: false`; flip it to `true` if you do want it,
 and it lands beside the existing file rather than inside `Featurettes/`.
 
-## Two steps, because DVD titles have no names
+## From the web UI
+
+The web UI (port 8080 in the container) is the easier route, and the one that
+handles a film the library does not have yet.
+
+A ripped movie ISO shows up under *Recently eaten* with a **needs review**
+badge. **Identify & import** reads the disc, ranks it against the films Radarr
+manages, and shows what it thinks with the extras it found:
+
+- **A confident match** arrives pre-selected. Confirm it and the extras are
+  encoded into that film's `Featurettes/`; the existing film file is untouched.
+- **No confident match** pre-selects nothing and shows candidates plus a search
+  box. Nothing is written until a film is picked.
+- **Not in the library at all** — search finds it on TMDB, marked *not in
+  library*. Confirming **adds it to Radarr first**, so Radarr computes the
+  folder name, then the main title is encoded in alongside the extras. Radarr
+  monitors it from then on and upgrades it whenever a better release appears.
+
+The film is added on the quality profile the library already uses most (across
+552 films here that is *01 HD Bluray + WEB (Upgrade)*, not whichever profile
+Radarr happens to list first). `RADARR_QUALITY_PROFILE` overrides.
+
+Encoding runs in the background — closing the panel does not stop it, and the
+badge tracks the disc through to **in library**.
+
+### Squashed disc labels
+
+ISO9660 volume labels cannot contain spaces, so discs arrive as
+`BENDITLIKEBECKHAM_4X3`. Matching compares space-stripped forms too, so a film
+already in the library still resolves (`ACLOCKWORKORANGE` → *A Clockwork
+Orange*, 0.97).
+
+TMDB's search has no such tolerance — it returns nothing for
+`benditlikebeckham` — so for a film **not** in the library the search box is
+prefilled with the label and the spaces have to be put back by hand. No
+heuristic reliably guesses word breaks, so the UI asks instead of pretending.
+
+## Two steps from the CLI, because DVD titles have no names
 
 A DVD title is a number and a duration. Nothing on the disc says which one is
 "Deleted Scenes". No tool can label them correctly on its own, so naming is a

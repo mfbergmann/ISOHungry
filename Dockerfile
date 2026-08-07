@@ -76,9 +76,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint
 COPY web/ /opt/isohungry/
 COPY scripts/retag-music.sh /opt/isohungry/retag-music.sh
 COPY scripts/identify-album.py /opt/isohungry/identify-album.py
-COPY scripts/extras-import.py /usr/local/bin/extras-import
+# Installed as an importable module so the web UI can reuse the disc scanning
+# and Radarr matching, with the CLI as a symlink onto the same file.
+COPY scripts/extras-import.py /opt/isohungry/extras_import.py
+RUN ln -sf /opt/isohungry/extras_import.py /usr/local/bin/extras-import
 RUN chmod +x /usr/local/bin/isohungry /usr/local/bin/entrypoint \
-             /usr/local/bin/extras-import \
+             /opt/isohungry/extras_import.py \
              /opt/isohungry/retag-music.sh /opt/isohungry/identify-album.py
 
 # C.UTF-8 makes bash count characters rather than bytes, so the status line

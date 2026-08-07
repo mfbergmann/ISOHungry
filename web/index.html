@@ -99,6 +99,48 @@
     font-size:.78rem; line-height:1.45; white-space:pre-wrap; word-break:break-word;
   }
   #logview .hdr { color:var(--cookie); font-weight:700; }
+
+  /* --- disc review (fork addition) --- */
+  .badge.ok   { background:var(--good); }
+  .badge.warn { background:var(--cookie); color:#1b1410; }
+  .modal {
+    position:fixed; inset:0; background:rgba(0,0,0,.65); display:none;
+    align-items:flex-start; justify-content:center; padding:2rem 1rem; z-index:20;
+    overflow-y:auto;
+  }
+  .modal.on { display:flex; }
+  .sheet {
+    background:var(--card); border:1px solid var(--edge); border-radius:12px;
+    padding:1.25rem; width:100%; max-width:44rem;
+  }
+  .sheet h3 { margin:0 0 .35rem; font-size:1.05rem; }
+  .sheet .hint { color:var(--dim); font-size:.8rem; margin-bottom:1rem; }
+  .pick {
+    display:flex; gap:.6rem; align-items:center; padding:.5rem;
+    border:1px solid var(--edge); border-radius:8px; margin-bottom:.4rem;
+    cursor:pointer; background:var(--bg);
+  }
+  .pick:hover { border-color:var(--cookie); }
+  .pick.sel   { border-color:var(--cookie); outline:1px solid var(--cookie); }
+  .pick img { width:34px; height:51px; object-fit:cover; border-radius:3px;
+              background:var(--edge); flex:0 0 auto; }
+  .pick .t { flex:1; min-width:0; }
+  .pick .t b { display:block; font-size:.9rem; }
+  .pick .t small { color:var(--dim); font-size:.75rem; }
+  .titlerow {
+    display:flex; gap:.5rem; align-items:center; padding:.35rem 0;
+    border-bottom:1px solid var(--edge);
+  }
+  .titlerow input[type=text] { flex:1; font-size:.85rem; }
+  .titlerow .dur { color:var(--dim); font-size:.78rem;
+                   font-variant-numeric:tabular-nums; min-width:4.5rem; }
+  .rowbtns { display:flex; gap:.5rem; margin-top:1rem; flex-wrap:wrap; }
+  .skiplist { color:var(--dim); font-size:.75rem; margin-top:.6rem; line-height:1.5; }
+  .joblog {
+    background:#000; color:#c8e6a0; border-radius:8px; padding:.6rem .8rem;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.75rem;
+    max-height:14rem; overflow:auto; margin-top:.75rem; white-space:pre-wrap;
+  }
 </style>
 </head>
 <body>
@@ -114,6 +156,10 @@
 
   <h2>Settings</h2>
   <div id="settings"><div class="card empty">loading…</div></div>
+
+  <div class="modal" id="review">
+    <div class="sheet" id="reviewSheet"></div>
+  </div>
 
   <h2>Logs</h2>
   <div id="logs"><div class="card empty">no logs yet</div></div>
@@ -210,12 +256,25 @@ function drawIsos(isos) {
     return;
   }
   const icon = {movies:'🎬', music:'🎵', data:'💾'};
+  const rbadge = {
+    new:       '<span class="badge warn">needs review</span>',
+    inspected: '<span class="badge warn">needs review</span>',
+    importing: '<span class="badge warn">importing…</span>',
+    imported:  '<span class="badge ok">in library</span>',
+    failed:    '<span class="badge">import failed</span>',
+    skipped:   '',
+  };
   box.innerHTML = isos.map(i => `
     <div class="card iso">
       <span class="nm">${icon[i.kind]||'💿'} ${esc(i.name)}
-        ${i.needs_id ? '<span class="badge">not identified</span>' : ''}</span>
+        ${i.needs_id ? '<span class="badge">not identified</span>' : ''}
+        ${i.kind === 'movies' && i.review ? (rbadge[i.review] || '') : ''}</span>
       <span class="time">${gb(i.size)}${i.tracks ? ' · '+i.tracks+' tracks' : ''}</span>
       ${i.needs_id ? `<button onclick="identify('${esc(i.rel)}','${esc(i.name)}')">Identify</button>` : ''}
+      ${i.kind === 'movies' && REVIEW_ON
+        ? `<button onclick="review('${esc(i.rel)}')">${
+             i.review === 'imported' ? 'Re-import' : 'Identify &amp; import'}</button>`
+        : ''}
       <button class="ghost" onclick="rename('${esc(i.rel)}','${esc(i.name)}')">Rename</button>
       ${i.kind === 'music' ? ''
         : `<a class="dl" href="/download/${i.rel.split('/').map(encodeURIComponent).join('/')}">↓</a>`}
@@ -226,6 +285,212 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g,
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+
+/* ---------------- disc review (fork addition) ----------------
+   A disc arrives as numbered titles and a volume label. Nothing on it names
+   the film, so nothing is written into the library until someone confirms
+   which film it is and what the extras are called. */
+let REVIEW_ON = false;
+let RV = null;          // {rel, data, chosen, jobId}
+
+async function review(rel) {
+  RV = {rel, data: null, chosen: null, jobId: null};
+  openSheet(`<h3>Reading the disc…</h3>
+             <div class="hint">Listing titles and looking for a match.</div>`);
+  const r = await fetch('/api/review/inspect?rel=' + encodeURIComponent(rel))
+                  .then(x => x.json()).catch(() => null);
+  if (!r || r.error) {
+    openSheet(`<h3>Could not read that disc</h3>
+      <div class="hint">${esc(r?.error || 'the server did not answer')}</div>
+      <div class="rowbtns"><button class="ghost" onclick="closeSheet()">Close</button></div>`);
+    return;
+  }
+  RV.data = r;
+  RV.chosen = r.suggestion || null;
+  drawReview();
+}
+
+function movieCard(m, i) {
+  const sel = RV.chosen && RV.chosen.tmdbId === m.tmdbId ? ' sel' : '';
+  return `<div class="pick${sel}" onclick="chooseMovie(${i})">
+    ${m.poster ? `<img src="${esc(m.poster)}" alt="" loading="lazy">` : '<img alt="">'}
+    <div class="t"><b>${esc(m.title)} (${esc(m.year)})</b>
+      <small>${m.in_library ? 'in your library' : 'not in library — will be added to Radarr'}
+      ${m.score != null ? ' · match ' + m.score : ''}</small></div>
+  </div>`;
+}
+
+let SHOWN = [];
+function chooseMovie(i) { RV.chosen = SHOWN[i]; drawReview(); }
+
+function drawReview() {
+  const d = RV.data;
+  SHOWN = d.suggestion
+    ? [d.suggestion, ...d.candidates.filter(c => c.tmdbId !== d.suggestion.tmdbId)]
+    : d.candidates.slice();
+  if (RV.chosen && !SHOWN.some(m => m.tmdbId === RV.chosen.tmdbId)) SHOWN.unshift(RV.chosen);
+
+  const c = RV.chosen;
+  const newToLibrary = c && !c.in_library;
+
+  openSheet(`
+    <h3>${d.suggestion ? 'Is this the right film?' : 'Which film is this?'}</h3>
+    <div class="hint">
+      Read from <b>${esc(d.iso.split('/').pop())}</b> — disc label looked like
+      “${esc(d.guess || 'nothing usable')}”. Feature runs ${esc(d.feature.duration)},
+      ${d.extras.length} extra${d.extras.length === 1 ? '' : 's'} found.
+      ${d.suggestion ? '' : ' No confident match, so nothing is pre-selected.'}
+    </div>
+
+    ${SHOWN.map(movieCard).join('') || '<div class="hint">No candidates — search below.</div>'}
+
+    <div class="titlerow" style="border:0;margin-top:.5rem">
+      <input type="text" id="rvSearch" placeholder="search by title, e.g. Alien 3 1992"
+             value="${esc(RV.search ?? d.guess ?? '')}"
+             onkeydown="if(event.key==='Enter')searchMovies()">
+      <button class="ghost" onclick="searchMovies()">Search</button>
+    </div>
+    ${!d.suggestion && !d.candidates.length ? `<div class="hint">
+      DVD volume labels can't contain spaces, so this one arrived squashed and
+      matched nothing. Put the spaces back and search — e.g.
+      “${esc(spaceHint(d.guess))}”.</div>` : ''}
+
+    ${c ? `
+      <div class="hint" style="margin:1rem 0 .3rem">
+        ${newToLibrary
+          ? `<b>${esc(c.title)} (${esc(c.year)})</b> isn't in the library yet.
+             It'll be added to Radarr so Radarr names the folder, then the main
+             title is ripped in alongside the extras — Radarr upgrades it later.`
+          : `Extras go to <b>${esc(c.path)}/Featurettes/</b>. The existing
+             film file is left alone.`}
+      </div>
+
+      <label class="titlerow" style="border:0">
+        <input type="checkbox" id="rvFeature" ${newToLibrary ? 'checked' : ''}
+               onchange="drawReviewKeep()" style="flex:0">
+        <span style="flex:1;font-size:.85rem">Also rip the main feature
+          (${esc(d.feature.duration)})${c.hasFile && !newToLibrary
+            ? ' — <b>you already have a file for this film</b>' : ''}</span>
+      </label>
+
+      <div class="hint" style="margin:.8rem 0 .2rem">Extras — name them from the
+        disc menu, untick anything you don't want:</div>
+      ${d.extras.map((t, i) => `
+        <label class="titlerow">
+          <input type="checkbox" ${t.include ? 'checked' : ''} id="rvInc${i}" style="flex:0">
+          <span class="dur">${esc(t.duration)}</span>
+          <input type="text" id="rvName${i}" value="${esc(t.name)}">
+        </label>`).join('') || '<div class="hint">No extras detected on this disc.</div>'}
+
+      ${d.skipped.length ? `<div class="skiplist"><b>Skipped:</b><br>` +
+        d.skipped.map(s => `title ${s.ix} · ${esc(s.duration)} — ${esc(s.reason)}`)
+                 .join('<br>') + '</div>' : ''}
+    ` : ''}
+
+    <div class="rowbtns">
+      ${c ? `<button onclick="confirmImport()">
+               ${newToLibrary ? 'Add to Radarr &amp; import' : 'Import extras'}</button>` : ''}
+      <button class="ghost" onclick="skipDisc()">Not now</button>
+      <button class="ghost" onclick="closeSheet()">Cancel</button>
+    </div>`);
+}
+
+// Redraw without losing what the user has typed into the extras rows.
+function drawReviewKeep() {
+  const feat = document.getElementById('rvFeature');
+  if (feat) RV.data._feat = feat.checked;
+  readTitleEdits();
+  drawReview();
+  const f = document.getElementById('rvFeature');
+  if (f && RV.data._feat !== undefined) f.checked = RV.data._feat;
+}
+
+function readTitleEdits() {
+  (RV.data.extras || []).forEach((t, i) => {
+    const nm = document.getElementById('rvName' + i);
+    const inc = document.getElementById('rvInc' + i);
+    if (nm) t.name = nm.value;
+    if (inc) t.include = inc.checked;
+  });
+}
+
+// Strip the aspect-ratio / edition noise DVD labels carry, leaving the part
+// that is actually the title. Only a hint for the search box — the user still
+// has to put the word breaks back, which no heuristic gets right.
+function spaceHint(guess) {
+  return String(guess || '').replace(/\s*\b\d(?:X|x)\d\b\s*/g, ' ').trim();
+}
+
+async function searchMovies() {
+  const q = (document.getElementById('rvSearch') || {}).value || '';
+  if (q.trim().length < 2) { toast('type at least two characters'); return; }
+  RV.search = q;
+  readTitleEdits();
+  toast('searching…');
+  const r = await fetch('/api/review/search?q=' + encodeURIComponent(q))
+                  .then(x => x.json()).catch(() => null);
+  if (!r || r.error) { toast(r?.error || 'search failed'); return; }
+  // Library hits first: importing into a film already tracked is the common
+  // case, and adding a duplicate to Radarr is the expensive mistake.
+  const seen = new Set();
+  RV.data.candidates = [...(r.library || []), ...(r.tmdb || [])]
+    .filter(m => !seen.has(m.tmdbId) && seen.add(m.tmdbId));
+  RV.data.suggestion = null;
+  drawReview();
+}
+
+async function confirmImport() {
+  readTitleEdits();
+  const feat = document.getElementById('rvFeature');
+  const body = {
+    rel: RV.rel,
+    tmdbId: RV.chosen.tmdbId,
+    includeFeature: !!(feat && feat.checked),
+    featureIx: RV.data.feature.ix,
+    extras: RV.data.extras.map(t => ({ix: t.ix, name: t.name, include: t.include})),
+  };
+  if (!body.includeFeature && !body.extras.some(t => t.include)) {
+    toast('nothing selected to import'); return;
+  }
+  const r = await post('/api/review/import', body);
+  if (!r) return;
+  RV.jobId = r.job;
+  if (r.created_movie) toast('added to Radarr — encoding now');
+  pollJob();
+}
+
+async function pollJob() {
+  const j = await fetch('/api/review/job?id=' + encodeURIComponent(RV.jobId))
+                  .then(x => x.json()).catch(() => null);
+  if (!j) { setTimeout(pollJob, 2000); return; }
+  const done = j.status === 'done' || j.status === 'failed';
+  openSheet(`
+    <h3>${done ? (j.status === 'done' ? 'Imported' : 'Import finished with errors')
+                : 'Importing…'}</h3>
+    <div class="hint">
+      ${esc((j.movie && j.movie.title) || '')} ${j.encoder ? '· ' + esc(j.encoder) : ''}
+      ${j.total ? ` · ${j.done||0}/${j.total}` : ''}
+      ${j.current ? '<br>encoding ' + esc(j.current) : ''}
+    </div>
+    ${j.error ? `<div class="hint">${esc(j.error)}</div>` : ''}
+    <div class="joblog">${(j.log || []).map(esc).join('\n') || 'starting…'}</div>
+    <div class="rowbtns">
+      <button class="ghost" onclick="closeSheet()">${done ? 'Close' : 'Run in background'}</button>
+    </div>`);
+  if (!done) setTimeout(pollJob, 2000);
+  else refresh();
+}
+
+async function skipDisc() {
+  await post('/api/review/skip', {rel: RV.rel});
+  closeSheet(); refresh();
+}
+
+function openSheet(html) {
+  $('#reviewSheet').innerHTML = html;
+  $('#review').classList.add('on');
+}
+function closeSheet() { $('#review').classList.remove('on'); }
 
 async function setName(fp, inputId) {
   const el = document.getElementById(inputId);
@@ -363,6 +628,7 @@ async function refresh() {
     `${d.drives.length} drive${d.drives.length===1?'':'s'} · ${busy} eating · ` +
     `${gb(d.free_bytes)} tummy space left`;
 
+  REVIEW_ON = !!d.review_enabled;
   if (!editing) drawDrives(d.drives);
   drawIsos(d.isos);
   drawLogs();

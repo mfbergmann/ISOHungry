@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+Disc review: confirm what a ripped disc actually is before anything is written
+into the film library.
+
+The ripper can only ever guess. A DVD carries a volume label like WB_DVD and a
+set of numbered titles; nothing on it names the film, and nothing names the
+extras. Guessing wrong means featurettes filed under the wrong movie, which is
+tedious to notice and worse to unpick.
+
+So the guess stops here and waits. This module inspects a finished ISO, ranks
+it against the films Radarr already manages, and hands the result to the web UI
+for a human to confirm. Only after that confirmation does anything get encoded.
+
+Two outcomes:
+
+  in the library    -> extras go into <movie>/Featurettes/, feature untouched
+  not in the library-> the film is added to Radarr first, so Radarr computes
+                       the folder name; the main title is encoded in alongside
+                       the extras and Radarr upgrades it on a later pass
+
+Import runs on a background thread because encoding takes minutes, and the
+browser must not be holding a socket open for it.
+"""
+import json
+import os
+import re
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+
+import extras_import as ei
+
+OUTPUT_DIR = os.environ.get("BASE_OUTPUT_DIR", "/output")
+REVIEW_DIR = os.path.join(OUTPUT_DIR, ".review")
+
+# Radarr needs both to add a film: which quality profile to track it against,
+# and which root folder to compute the path under. Both are discovered rather
+# than configured, so the stack can change without editing this.
+ROOT_FOLDER = os.environ.get("RADARR_ROOT_FOLDER", "")
+QUALITY_PROFILE = os.environ.get("RADARR_QUALITY_PROFILE", "")
+
+_jobs = {}
+_jobs_lock = threading.Lock()
+
+
+# --------------------------------------------------------------- review state
+
+def _review_path(iso_path):
+    os.makedirs(REVIEW_DIR, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(iso_path))
+    return os.path.join(REVIEW_DIR, safe + ".json")
+
+
+def load_review(iso_path):
+    try:
+        with open(_review_path(iso_path)) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_review(iso_path, data):
+    path = _review_path(iso_path)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+    try:
+        os.chown(path, ei.OWNER_UID, ei.OWNER_GID)
+    except (PermissionError, OSError):
+        pass
+    return data
+
+
+def review_status(iso_path):
+    """One of: new, inspected, importing, imported, failed, skipped."""
+    return (load_review(iso_path).get("status") or "new")
+
+
+# ------------------------------------------------------------------- inspect
+
+def _movie_brief(m, score=None, in_library=True):
+    out = {
+        "title": m.get("title"),
+        "year": m.get("year"),
+        "tmdbId": m.get("tmdbId"),
+        "path": m.get("path") or "",
+        "in_library": in_library,
+        "hasFile": bool(m.get("hasFile")),
+        "poster": "",
+    }
+    for img in m.get("images") or []:
+        if img.get("coverType") == "poster":
+            out["poster"] = img.get("remoteUrl") or img.get("url") or ""
+            break
+    if score is not None:
+        out["score"] = round(score, 3)
+    return out
+
+
+def inspect_iso(iso_path):
+    """Read the disc's titles and propose a film, without writing anything."""
+    titles = ei.lsdvd_titles(iso_path)
+    if not titles:
+        raise ValueError("no DVD titles found — is this a video DVD?")
+
+    feature, extras, skipped = ei.classify(titles)
+    guess = ei.guess_name_from_iso(iso_path)
+
+    suggestion, candidates = None, []
+    if guess:
+        want, year = ei.parse_query(guess)
+        if want:
+            ranked = ei.rank_movies(want, ei.radarr_get("movie"), year)
+            candidates = [_movie_brief(m, s) for s, shares, m in ranked[:6]
+                          if s > 0.4 and (shares or s >= 0.85)]
+            top_score, shares_word, top = ranked[0] if ranked else (0, False, None)
+            # Same bar the CLI uses. Below it the UI shows candidates and a
+            # search box instead of a pre-selected answer, so a weak guess
+            # never arrives looking like a decision already made.
+            if top and top_score >= ei.MATCH_THRESHOLD and shares_word:
+                suggestion = _movie_brief(top, top_score)
+
+        # Nothing in the library looks right, so the disc is probably a film
+        # that is not tracked yet. Ask TMDB now rather than making someone
+        # retype a title the disc label already spelled out.
+        if not suggestion:
+            seen = {c["tmdbId"] for c in candidates}
+            for m in search_tmdb(guess):
+                if m["tmdbId"] not in seen:
+                    candidates.append(m)
+                    seen.add(m["tmdbId"])
+
+    return {
+        "iso": iso_path,
+        "guess": guess,
+        "suggestion": suggestion,
+        "candidates": candidates,
+        "feature": {
+            "ix": feature["ix"],
+            "duration": ei.human_duration(feature["seconds"]),
+            "seconds": feature["seconds"],
+        },
+        "extras": [
+            {
+                "ix": t["ix"],
+                "duration": ei.human_duration(t["seconds"]),
+                "seconds": t["seconds"],
+                "chapters": t["chapters"],
+                "include": True,
+                "name": "Featurette %02d (%s)" % (n, ei.human_duration(t["seconds"])),
+            }
+            for n, t in enumerate(extras, 1)
+        ],
+        "skipped": [
+            {"ix": t["ix"], "duration": ei.human_duration(t["seconds"]),
+             "reason": t["reason"]}
+            for t in skipped
+        ],
+    }
+
+
+# -------------------------------------------------------------------- search
+
+def search_library(term):
+    """Rank the films Radarr already manages against a search term.
+
+    Requires a whole word in common, not just a good character ratio. Without
+    it a search for "The Matrix" lists The Master, Mata Hari and Matilda above
+    the TMDB result for the film actually being searched for - which invites
+    exactly the misfiling this whole flow exists to prevent.
+    """
+    want, year = ei.parse_query(term)
+    if not want:
+        return []
+    ranked = ei.rank_movies(want, ei.radarr_get("movie"), year)
+    return [_movie_brief(m, s) for s, shares_word, m in ranked[:8]
+            if s > 0.4 and (shares_word or s >= 0.85)]
+
+
+def search_tmdb(term):
+    """Radarr's own TMDB lookup, for films not in the library yet.
+
+    Going through Radarr rather than TMDB directly means the title, year and
+    tmdbId are exactly the ones Radarr will use to build the folder name.
+    """
+    try:
+        results = ei.radarr_get(
+            "movie/lookup?term=" + urllib.parse.quote(term[:200]))
+    except SystemExit:
+        return []
+    out = []
+    for m in results[:8]:
+        # Radarr returns library entries here too, flagged by having an id.
+        out.append(_movie_brief(m, in_library=bool(m.get("id"))))
+    return out
+
+
+# ------------------------------------------------------- adding to the library
+
+def _radarr_defaults():
+    root = ROOT_FOLDER
+    if not root:
+        folders = ei.radarr_get("rootfolder")
+        if not folders:
+            raise ValueError("Radarr has no root folder configured")
+        # The movies root, not whatever happens to be first.
+        pick = next((f for f in folders if "movie" in (f.get("path") or "").lower()),
+                    folders[0])
+        root = pick["path"]
+
+    profile = QUALITY_PROFILE
+    if not profile:
+        profiles = ei.radarr_get("qualityprofile")
+        if not profiles:
+            raise ValueError("Radarr has no quality profile configured")
+        # The profile the library overwhelmingly already uses, not whichever
+        # Radarr happens to list first. A film added by this flow should be
+        # tracked the same way every other film is, so it upgrades on the same
+        # terms. RADARR_QUALITY_PROFILE overrides when that is not wanted.
+        counts = {}
+        for m in ei.radarr_get("movie"):
+            pid = m.get("qualityProfileId")
+            if pid:
+                counts[pid] = counts.get(pid, 0) + 1
+        valid = {p["id"] for p in profiles}
+        ranked = sorted((n, pid) for pid, n in counts.items() if pid in valid)
+        profile = ranked[-1][1] if ranked else profiles[0]["id"]
+    return root, int(profile)
+
+
+def add_to_radarr(tmdb_id):
+    """Add a film to Radarr and return its record, folder path included.
+
+    Radarr computes the folder name from its own naming configuration, so the
+    directory this creates matches every other folder in the library by
+    construction rather than by imitation.
+    """
+    for m in ei.radarr_get("movie"):
+        if m.get("tmdbId") == tmdb_id:
+            return m                                    # already there
+
+    lookup = ei.radarr_get("movie/lookup/tmdb?tmdbId=%d" % tmdb_id)
+    if isinstance(lookup, list):
+        lookup = lookup[0] if lookup else None
+    if not lookup:
+        raise ValueError("TMDB id %s not found" % tmdb_id)
+
+    root, profile = _radarr_defaults()
+    payload = {
+        "title": lookup["title"],
+        "tmdbId": tmdb_id,
+        "year": lookup.get("year"),
+        "titleSlug": lookup.get("titleSlug"),
+        "images": lookup.get("images", []),
+        "qualityProfileId": profile,
+        "rootFolderPath": root,
+        "monitored": True,
+        "minimumAvailability": "released",
+        # Do not kick off an indexer search: the disc in hand is the point.
+        # Radarr will upgrade on its own schedule once the film is monitored.
+        "addOptions": {"searchForMovie": False},
+    }
+    created = ei.radarr_post("movie", payload)
+    if not created or not created.get("path"):
+        raise ValueError("Radarr rejected the add for tmdb-%d" % tmdb_id)
+    return created
+
+
+# --------------------------------------------------------------- import jobs
+
+def _set(job_id, **kw):
+    with _jobs_lock:
+        _jobs.setdefault(job_id, {}).update(kw)
+
+
+def job(job_id):
+    with _jobs_lock:
+        return dict(_jobs.get(job_id) or {})
+
+
+def _run_import(job_id, iso_path, movie, extras, include_feature, feature_ix,
+                feature_name):
+    """Encode the chosen titles into the movie folder. Runs on its own thread."""
+    try:
+        movie_path = movie["path"]
+        os.makedirs(movie_path, exist_ok=True)
+        try:
+            os.chown(movie_path, ei.OWNER_UID, ei.OWNER_GID)
+        except (PermissionError, OSError):
+            pass
+
+        extras_dir = os.path.join(movie_path, ei.EXTRAS_SUBDIR)
+        encoder = ei.pick_encoder()
+
+        work = []
+        if include_feature:
+            # The feature belongs beside the extras folder, not inside it.
+            # Naming it after the folder is what Radarr's scanner expects; it
+            # renames to the configured format when it imports.
+            work.append((feature_ix, os.path.join(
+                movie_path, ei.safe_filename(feature_name) + ".mkv"), True))
+        for t in extras:
+            if not t.get("include"):
+                continue
+            work.append((t["ix"], os.path.join(
+                extras_dir, ei.safe_filename(t["name"]) + ".mkv"), False))
+
+        _set(job_id, status="running", total=len(work), done=0,
+             encoder=encoder, movie=movie, log=[])
+
+        ok = failed = 0
+        for n, (ix, dest, is_feature) in enumerate(work, 1):
+            label = os.path.basename(dest)
+            _set(job_id, current=label, done=n - 1)
+            if os.path.exists(dest):
+                _append_log(job_id, "skipped (exists): %s" % label)
+                continue
+            good, err = ei.encode_title(iso_path, ix, dest, encoder)
+            if good:
+                ok += 1
+                _append_log(job_id, "imported: %s" % label)
+            else:
+                failed += 1
+                _append_log(job_id, "FAILED: %s — %s" % (label, (err or "")[:200]))
+
+        _set(job_id, done=len(work), current="")
+
+        if ok:
+            ei.notify_plex(movie_path)
+            # Radarr only learns about the main feature by rescanning; extras
+            # are invisible to it either way.
+            if movie.get("id"):
+                ei.radarr_post("command", {"name": "RescanMovie",
+                                           "movieId": movie["id"]})
+                _append_log(job_id, "asked Radarr to rescan")
+
+        _set(job_id, status="failed" if failed and not ok else "done",
+             ok=ok, failed=failed, finished=time.time())
+
+        review = load_review(iso_path)
+        review.update({
+            "status": "imported" if ok and not failed else
+                      ("failed" if failed and not ok else "imported"),
+            "movie": movie, "imported": ok, "failed": failed,
+            "finished": time.time(),
+        })
+        save_review(iso_path, review)
+
+    except Exception as e:                              # noqa: BLE001
+        _set(job_id, status="failed", error=str(e),
+             trace=traceback.format_exc()[-800:], finished=time.time())
+        review = load_review(iso_path)
+        review.update({"status": "failed", "error": str(e)})
+        save_review(iso_path, review)
+
+
+def _append_log(job_id, line):
+    with _jobs_lock:
+        _jobs.setdefault(job_id, {}).setdefault("log", []).append(line)
+
+
+def start_import(iso_path, tmdb_id, extras, include_feature=False,
+                 feature_ix=None, feature_name=None, add_if_missing=True):
+    """Confirm the film, then kick off encoding on a background thread."""
+    movie = None
+    for m in ei.radarr_get("movie"):
+        if m.get("tmdbId") == tmdb_id:
+            movie = m
+            break
+
+    created = False
+    if movie is None:
+        if not add_if_missing:
+            raise ValueError("tmdb-%s is not in Radarr" % tmdb_id)
+        movie = add_to_radarr(tmdb_id)
+        created = True
+
+    if not feature_name:
+        feature_name = os.path.basename(movie["path"].rstrip("/"))
+
+    job_id = "%d" % (time.time() * 1000)
+    _set(job_id, status="queued", iso=iso_path, done=0, total=0,
+         created_movie=created, log=[])
+
+    save_review(iso_path, {
+        "status": "importing", "movie": _movie_brief(movie),
+        "job": job_id, "started": time.time(),
+        "created_movie": created,
+    })
+
+    threading.Thread(
+        target=_run_import,
+        args=(job_id, iso_path, movie, extras, include_feature, feature_ix,
+              feature_name),
+        daemon=True,
+    ).start()
+    return job_id, movie, created
