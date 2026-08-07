@@ -78,7 +78,20 @@ def save_review(iso_path, data):
 
 def review_status(iso_path):
     """One of: new, inspected, importing, imported, failed, skipped."""
-    return (load_review(iso_path).get("status") or "new")
+    data = load_review(iso_path)
+    status = data.get("status") or "new"
+    # Jobs live in memory, so a container restart mid-encode leaves the disc
+    # claiming "importing" with nothing behind it and no way back. If the job
+    # this review points at is gone, the import died with it.
+    if status == "importing":
+        with _jobs_lock:
+            alive = data.get("job") in _jobs
+        if not alive:
+            data["status"] = "failed"
+            data["error"] = "interrupted — the ripper restarted mid-import"
+            save_review(iso_path, data)
+            return "failed"
+    return status
 
 
 # ------------------------------------------------------------------- inspect

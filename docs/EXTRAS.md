@@ -142,6 +142,7 @@ env-tunable (`EXTRAS_MIN_SECS`, `EXTRAS_MAX_SECS`, `EXTRAS_FEATURE_RATIO`).
 | `PLEX_URL` / `PLEX_TOKEN` | — | Targeted rescan after import; skipped if unset |
 | `EXTRAS_SUBDIR` | `Featurettes` | Any [Plex extras folder name](https://support.plex.tv/articles/local-files-for-trailers-and-extras/) |
 | `EXTRAS_ENCODER` | auto | `nvenc_h265` when the GPU is reachable, else `x265` |
+| `EXTRAS_FILTERS` | `--detelecine --deinterlace` | Deinterlacing chain — see below |
 | `EXTRAS_QUALITY` | `22` | HandBrake RF |
 | `EXTRAS_MATCH_THRESHOLD` | `0.78` | Below this, refuse rather than guess |
 | `EXTRAS_UID` / `EXTRAS_GID` | `99` / `100` | Ownership of written files |
@@ -153,3 +154,32 @@ Radarr must be mounted the same way in both containers — this one uses the
 Encoder selection probes at runtime: HandBrake only lists the nvenc encoders
 when it can actually reach the card, so a broken GPU passthrough degrades to
 software x265 instead of failing the import.
+
+## Why the GPU looks idle, and why the filters matter more
+
+Measured on one NTSC DVD title, RTX 3060, `nvenc_h265`:
+
+| Filters | Speed | 112 min feature |
+|---|---|---|
+| `--comb-detect --decomb` | 15.2 fps | ~3.7 h |
+| `--decomb` alone | 18.0 fps | ~3.1 h |
+| `--comb-detect` alone | 22.7 fps | ~2.5 h |
+| **`--detelecine --deinterlace`** (default) | **39.5 fps** | **~85 min** |
+| `--detelecine` alone | 55.8 fps | ~60 min |
+| no filters | 94.7 fps | ~35 min |
+
+`nvidia-smi` shows the encoder at 0–2% throughout, which looks like the GPU is
+not being used. It is — it is just never the bottleneck. Debian's HandBrake
+reports `nvdec: is not compiled into this build`, so MPEG-2 decode and every
+filter run on the CPU and only the final encode is offloaded. Throwing a bigger
+card at this changes nothing; the filter chain is the whole story.
+
+The default inverts telecine rather than masking it. A film shot at 24 fps and
+pressed to an NTSC DVD carries 3:2 pulldown, and `--detelecine` undoes that
+exactly, restoring true 23.976p — cheaper *and* more faithful than `--decomb`,
+which only smooths the combing it finds. `--deinterlace` (yadif) then handles
+extras shot on video, which telecine does not describe.
+
+Set `EXTRAS_FILTERS="--detelecine"` for a disc you know is entirely film, or
+`EXTRAS_FILTERS="--comb-detect --decomb"` to trade 2.6× the time for
+HandBrake's most thorough adaptive handling.

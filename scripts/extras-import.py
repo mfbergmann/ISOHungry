@@ -69,6 +69,27 @@ EXTRAS_SUBDIR = os.environ.get("EXTRAS_SUBDIR", "Featurettes")
 OWNER_UID = int(os.environ.get("EXTRAS_UID", "99"))
 OWNER_GID = int(os.environ.get("EXTRAS_GID", "100"))
 
+# Deinterlacing dominates the runtime, and HandBrake's comb-detect/decomb pair
+# is startlingly expensive: measured on one NTSC DVD title, RTX 3060, nvenc_h265
+#
+#   --comb-detect --decomb        15.2 fps    (~3.7 h for a 112 min feature)
+#   --decomb alone                18.0 fps
+#   --comb-detect alone           22.7 fps
+#   --detelecine --deinterlace    39.5 fps    (~85 min)
+#   --detelecine alone            55.8 fps
+#   no filters                    94.7 fps
+#
+# The default below is the fourth line. A film shot at 24 fps and pressed to an
+# NTSC DVD is 3:2 pulldown, and detelecine inverts that exactly - it is both
+# cheaper AND more correct than decomb, which only papers over the combing.
+# yadif then cleans up extras shot on video, which telecine does not describe.
+#
+# The GPU is not the constraint either way: Debian's HandBrake reports
+# "nvdec: is not compiled into this build", so MPEG-2 decode and every filter
+# run on CPU and only the encode is offloaded. NVENC sits near-idle at 0-2%.
+FILTER_ARGS = (os.environ.get("EXTRAS_FILTERS")
+               or "--detelecine --deinterlace").split()
+
 
 class LsdvdError(Exception):
     """Reading the disc failed.
@@ -396,8 +417,7 @@ def encode_title(iso_path, title_ix, dest, encoder):
         "-f", "av_mkv",
         "-e", encoder,
         "-q", os.environ.get("EXTRAS_QUALITY", "22"),
-        # DVD extras are interlaced far more often than the feature is.
-        "--comb-detect", "--decomb",
+    ] + FILTER_ARGS + [
         "--all-audio", "--aencoder", "copy", "--audio-fallback", "av_aac",
         "--subtitle", "scan", "--subtitle-forced",
         "--markers",
