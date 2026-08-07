@@ -21,6 +21,11 @@ import re
 import subprocess
 import sys
 from difflib import SequenceMatcher
+
+try:
+    import vision
+except Exception:                                        # noqa: BLE001
+    vision = None
 import tempfile
 
 # Where the list starts. Studios are not consistent, so this is generous.
@@ -240,6 +245,25 @@ def _quality(text):
 
 
 def read_cover(path):
+    """The features list, preferring a vision model when one is reachable.
+
+    Tesseract stays as the fallback because it needs nothing running. It is a
+    genuine fallback though, not a peer: on the photo these were developed
+    against it found 5 of 7 features to the vision model's 6, with more noise
+    in the ones it did find.
+    """
+    if vision and vision.available():
+        try:
+            items = vision.read_cover(path)
+            if items:
+                return [_trim_bleed(_clean_item(i)) for i in items
+                        if _plausible(i) and not _is_filler(i)], None
+        except Exception:                                # noqa: BLE001
+            pass                                         # fall through to OCR
+    return _read_cover_tesseract(path)
+
+
+def _read_cover_tesseract(path):
     """Features list, merged across several readings of the same photo.
 
     No single pass gets a whole panel: thresholds that recover the bright
