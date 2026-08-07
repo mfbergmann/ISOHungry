@@ -92,21 +92,35 @@ def save_review(iso_path, data):
 
 
 def review_status(iso_path):
-    """One of: new, inspected, importing, imported, failed, skipped."""
+    """One of: new, inspected, scanning, importing, imported, failed, skipped."""
     data = load_review(iso_path)
     status = data.get("status") or "new"
-    # Jobs live in memory, so a container restart mid-encode leaves the disc
-    # claiming "importing" with nothing behind it and no way back. If the job
-    # this review points at is gone, the import died with it.
-    if status == "importing":
+    # Jobs live in memory, so a restart mid-job leaves a review pointing at a
+    # job that no longer exists. An import at least said "importing" and could
+    # be reported as interrupted; a menu scan said nothing at all, so it just
+    # vanished and the disc looked untouched. Every long job now records itself
+    # the same way and is recovered the same way.
+    if status in ("importing", "scanning"):
         with _jobs_lock:
             alive = data.get("job") in _jobs
         if not alive:
+            what = "import" if status == "importing" else "menu scan"
             data["status"] = "failed"
-            data["error"] = "interrupted — the ripper restarted mid-import"
+            data["error"] = ("interrupted — the ripper restarted during the %s"
+                             % what)
             save_review(iso_path, data)
             return "failed"
     return status
+
+
+def _clear_job_marker(iso_path, job_id):
+    """Release a review from a finished job without losing what it produced."""
+    data = load_review(iso_path)
+    if data.get("job") == job_id and data.get("status") == "scanning":
+        data["status"] = data.get("prior_status") or "inspected"
+        data.pop("job", None)
+        data.pop("prior_status", None)
+        save_review(iso_path, data)
 
 
 # ------------------------------------------------------------------- inspect
@@ -543,6 +557,14 @@ def start_menu_scan(iso_path):
     _set(job_id, status="running", total=1, done=0,
          current="reading disc menus", log=[])
 
+    # Recorded before the thread starts, so a restart one second later still
+    # leaves evidence that a scan was under way.
+    claim = load_review(iso_path)
+    claim["prior_status"] = claim.get("status") or "new"
+    claim["status"] = "scanning"
+    claim["job"] = job_id
+    save_review(iso_path, claim)
+
     def run():
         try:
             names = dvdmenu.menu_names(iso_path, want_frames=2)
@@ -552,6 +574,10 @@ def start_menu_scan(iso_path):
                 for n in names]
             review["menu_scanned"] = time.time()
             save_review(iso_path, review)
+            review["status"] = review.get("prior_status") or "inspected"
+            review.pop("job", None)
+            review.pop("prior_status", None)
+            save_review(iso_path, review)
             for n in names:
                 _append_log(job_id, "%s  [%s]" % (n["label"], n["kind"]))
             _append_log(job_id, "read %d candidate names" % len(names))
@@ -559,6 +585,7 @@ def start_menu_scan(iso_path):
                  names=review["menu_names"], finished=time.time())
         except Exception as e:                           # noqa: BLE001
             _append_log(job_id, "FAILED: %s" % e)
+            _clear_job_marker(iso_path, job_id)
             _set(job_id, status="failed", error=str(e), finished=time.time())
 
     threading.Thread(target=run, daemon=True).start()

@@ -139,3 +139,64 @@ MENU_PROMPT = (
 def read_menu(image_path, timeout=None):
     """The playable items on a DVD menu screen, in reading order."""
     return ask_json_list(image_path, MENU_PROMPT, timeout=timeout)
+
+
+# How long Ollama should hold the model after a preload. A rip runs twenty
+# minutes or more and the review follows it, so the useful window is the whole
+# of that: loading on demand at review time costs minutes of cold start on a
+# screen someone is sitting in front of.
+KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "2h")
+
+
+def loaded():
+    """Whether the model is already resident in VRAM."""
+    if not (OLLAMA_URL and VISION_MODEL):
+        return False
+    try:
+        with urllib.request.urlopen(OLLAMA_URL + "/api/ps", timeout=5) as r:
+            running = json.load(r)
+    except (urllib.error.URLError, ValueError, OSError):
+        return False
+    return any(m.get("name") == VISION_MODEL
+               for m in running.get("models") or [])
+
+
+def preload(timeout=900):
+    """Warm the model, quietly, without generating anything.
+
+    Ollama loads a model on first use, which is minutes for an 8B. Doing that
+    while a disc is ripping means it is already resident by the time anyone
+    looks at the review screen. Never fatal: if Ollama is down or the model is
+    missing, cover and menu reading fall back to tesseract as they always did.
+    """
+    if os.environ.get("VISION_PRELOAD", "1") != "1":
+        return False, "preload disabled"
+    if not (OLLAMA_URL and VISION_MODEL):
+        return False, "no vision model configured"
+    if loaded():
+        return True, "already loaded"
+    if not available():
+        return False, "ollama unreachable or model not pulled"
+    payload = json.dumps({"model": VISION_MODEL, "keep_alive": KEEP_ALIVE}).encode()
+    req = urllib.request.Request(
+        OLLAMA_URL + "/api/generate", data=payload,
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+        return True, "loaded %s (held for %s)" % (VISION_MODEL, KEEP_ALIVE)
+    except (urllib.error.URLError, OSError) as e:
+        return False, "could not load: %s" % e
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    if "--preload" in _sys.argv:
+        ok, msg = preload()
+        print(msg)
+        _sys.exit(0 if ok else 1)
+    if "--status" in _sys.argv:
+        print("configured: %s" % bool(OLLAMA_URL and VISION_MODEL))
+        print("model     : %s" % (VISION_MODEL or "-"))
+        print("available : %s" % available())
+        print("loaded    : %s" % loaded())

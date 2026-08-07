@@ -697,6 +697,12 @@ rip_disc() {
   rm -rf "$scratch"
   mkdir -p "$scratch"
 
+  # A vision model reads this disc's menus and box art later, and loading an
+  # 8B model takes minutes. Start it warming now, while the rip runs, so the
+  # review screen is not waiting on a cold start. Backgrounded and silenced:
+  # nothing here should be able to delay or fail a rip.
+  ( python3 /opt/isohungry/vision.py --preload >/dev/null 2>&1 & ) 2>/dev/null || true
+
   set_status "$dev_name" "🍪 NOM NOM NOM! Eating $label" "$start"
   dvdbackup -M -i "$device" -o "$scratch" 2>&1 | filter_read_errors >> "$logfile"
   if (( ${PIPESTATUS[0]} != 0 )); then
