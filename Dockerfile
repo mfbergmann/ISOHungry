@@ -86,12 +86,14 @@ COPY scripts/extras-import.py /opt/isohungry/extras_import.py
 COPY scripts/discdb.py /opt/isohungry/discdb.py
 COPY scripts/dvdmenu.py /opt/isohungry/dvdmenu.py
 COPY scripts/drive-status.py /opt/isohungry/drive-status.py
+COPY scripts/cover_ocr.py /opt/isohungry/cover_ocr.py
 RUN ln -sf /opt/isohungry/extras_import.py /usr/local/bin/extras-import \
  && ln -sf /opt/isohungry/discdb.py /usr/local/bin/discdb \
  && ln -sf /opt/isohungry/dvdmenu.py /usr/local/bin/dvdmenu
 RUN chmod +x /usr/local/bin/isohungry /usr/local/bin/entrypoint \
              /opt/isohungry/extras_import.py /opt/isohungry/discdb.py \
              /opt/isohungry/dvdmenu.py /opt/isohungry/drive-status.py \
+             /opt/isohungry/cover_ocr.py \
              /opt/isohungry/retag-music.sh /opt/isohungry/identify-album.py
 
 # C.UTF-8 makes bash count characters rather than bytes, so the status line

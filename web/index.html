@@ -424,7 +424,9 @@ function drawReview() {
           ${t.source === 'thediscdb'
             ? '<span class="badge ok" title="exact name from TheDiscDb">db</span>'
             : t.source === 'menu'
-            ? '<span class="badge warn" title="read off the disc menu — check it">ocr</span>' : ''}
+            ? '<span class="badge warn" title="read off the disc menu — check it">ocr</span>'
+            : t.source === 'cover'
+            ? '<span class="badge warn" title="read off the box art — check the pairing">box</span>' : ''}
         </label>`).join('') || '<div class="hint">No extras detected on this disc.</div>'}
 
       ${d.skipped.length ? `<div class="skiplist"><b>Skipped:</b><br>` +
@@ -435,6 +437,15 @@ function drawReview() {
     <div class="rowbtns">
       ${c ? `<button onclick="confirmImport()">
                ${newToLibrary ? 'Add to Radarr &amp; import' : 'Import extras'}</button>` : ''}
+      ${d.discdb && !d.discdb.matched ? `
+        <label class="ghost" style="display:inline-flex;align-items:center;gap:.4rem;
+               border:1px solid var(--edge);border-radius:6px;padding:.4rem .8rem;
+               font-size:.85rem;color:var(--dim);cursor:pointer"
+               title="Photograph the back of the case — printed text reads far better than menu video">
+          Read names from box art
+          <input type="file" accept="image/*" capture="environment"
+                 style="display:none" onchange="coverPhoto(this)">
+        </label>` : ''}
       ${d.discdb && !d.discdb.matched
         ? `<button class="ghost" onclick="menuScan()"
              title="Render the disc's own menus and read the labels off them (slow)">
@@ -536,6 +547,44 @@ async function pollJob() {
     </div>`);
   if (!done) setTimeout(pollJob, 2000);
   else refresh();
+}
+
+// A photo of the case back. Printed text on card is close to tesseract's best
+// case, where menu text over moving video is close to its worst — so this
+// usually beats the menu scan, and takes seconds rather than minutes.
+async function coverPhoto(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  readTitleEdits();
+  toast('reading the cover…');
+  let r;
+  try {
+    r = await fetch('/api/review/cover?rel=' + encodeURIComponent(RV.rel),
+                    {method: 'POST', body: file}).then(x => x.json());
+  } catch { toast('upload failed'); return; }
+  input.value = '';
+  if (r.error && !(r.names || []).length) { toast(r.error); return; }
+  RV.coverNames = r.names || [];
+  openSheet(`
+    <h3>Read from the box art</h3>
+    <div class="hint">${RV.coverNames.length} feature${RV.coverNames.length === 1 ? '' : 's'}
+      listed on the cover. The cover says how they are spelled; it cannot say
+      which title each one is, so check the pairing after applying.</div>
+    <div class="joblog">${RV.coverNames.map((n, i) => esc((i + 1) + '. ' + n)).join('\n')
+      || 'nothing found'}</div>
+    <div class="rowbtns">
+      ${RV.coverNames.length ? `<button onclick="applyCoverNames()">Use these names, in order</button>` : ''}
+      <button class="ghost" onclick="drawReview()">Back</button>
+    </div>`);
+}
+
+function applyCoverNames() {
+  const names = RV.coverNames || [];
+  RV.data.extras.forEach((t, i) => {
+    if (i < names.length) { t.name = names[i]; t.source = 'cover'; }
+  });
+  toast(`applied ${Math.min(names.length, RV.data.extras.length)} names — check the pairing`);
+  drawReview();
 }
 
 async function menuScan() {

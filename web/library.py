@@ -44,6 +44,11 @@ try:
 except Exception:                                        # noqa: BLE001
     dvdmenu = None
 
+try:
+    import cover_ocr
+except Exception:                                        # noqa: BLE001
+    cover_ocr = None
+
 OUTPUT_DIR = os.environ.get("BASE_OUTPUT_DIR", "/output")
 REVIEW_DIR = os.path.join(OUTPUT_DIR, ".review")
 
@@ -558,6 +563,32 @@ def start_menu_scan(iso_path):
 
     threading.Thread(target=run, daemon=True).start()
     return job_id
+
+
+def read_cover_photo(iso_path, image_bytes):
+    """Read a photo of the case's back cover for the special-features list.
+
+    Fast enough to answer inline - one image, a few OCR passes - unlike the
+    menu scan, which has to render every menu on the disc.
+    """
+    if not cover_ocr:
+        raise ValueError("cover reading is unavailable")
+
+    photo = _review_path(iso_path).replace(".json", ".cover.jpg")
+    with open(photo, "wb") as fh:
+        fh.write(image_bytes)
+    try:
+        os.chown(photo, ei.OWNER_UID, ei.OWNER_GID)
+    except (PermissionError, OSError):
+        pass
+
+    items, err = cover_ocr.read_cover(photo)
+    review = load_review(iso_path)
+    review["cover_photo"] = photo
+    review["cover_names"] = items
+    review["cover_read"] = time.time()
+    save_review(iso_path, review)
+    return items, err
 
 
 def start_discdb_sync():

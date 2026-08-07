@@ -519,8 +519,38 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._send(500, {"error": (p.stderr or "lookup failed").strip()[:300]})
 
+    def _cover_upload(self):
+        """Accept a photo of the case back and OCR its special-features list."""
+        if not library:
+            self._send(503, {"error": "review unavailable"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if not 0 < length <= 16 * 1024 * 1024:
+            self._send(413, {"error": "photo must be under 16 MB"})
+            return
+        query = parse_qs(urlparse(self.path).query)
+        target = self._resolve((query.get("rel") or [""])[0], want="file")
+        if not target:
+            self._send(404, {"error": "no such ISO"})
+            return
+        data = self.rfile.read(length)
+        try:
+            items, err = library.read_cover_photo(target, data)
+        except Exception as e:                           # noqa: BLE001
+            self._send(400, {"error": str(e) or "could not read the photo"})
+            return
+        self._send(200, {"ok": True, "names": items, "error": err})
+
     # ----------------------------------------------------------------- POST
     def _do_POST(self):
+        path_only = self.path.split("?", 1)[0]
+
+        # A cover photo is raw image bytes, not JSON, and is far larger than
+        # the JSON limit below allows. Handled before the body is parsed.
+        if path_only == "/api/review/cover":
+            self._cover_upload()
+            return
+
         length = int(self.headers.get("Content-Length") or 0)
         if length > 64 * 1024:
             self._send(413, {"error": "too large"})
