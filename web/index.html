@@ -422,7 +422,9 @@ function drawReview() {
             PLEX_DIRS.map(dir => `<option${dir === (t.subdir || 'Featurettes')
               ? ' selected' : ''}>${dir}</option>`).join('')}</select>
           ${t.source === 'thediscdb'
-            ? '<span class="badge ok" title="name from TheDiscDb">db</span>' : ''}
+            ? '<span class="badge ok" title="exact name from TheDiscDb">db</span>'
+            : t.source === 'menu'
+            ? '<span class="badge warn" title="read off the disc menu — check it">ocr</span>' : ''}
         </label>`).join('') || '<div class="hint">No extras detected on this disc.</div>'}
 
       ${d.skipped.length ? `<div class="skiplist"><b>Skipped:</b><br>` +
@@ -433,6 +435,10 @@ function drawReview() {
     <div class="rowbtns">
       ${c ? `<button onclick="confirmImport()">
                ${newToLibrary ? 'Add to Radarr &amp; import' : 'Import extras'}</button>` : ''}
+      ${d.discdb && !d.discdb.matched
+        ? `<button class="ghost" onclick="menuScan()"
+             title="Render the disc's own menus and read the labels off them (slow)">
+             Read names from disc menu</button>` : ''}
       ${c && d.discdb && !d.discdb.matched
         ? `<button class="ghost" onclick="contribute()"
              title="Write a submission for TheDiscDb so the next person gets these names">
@@ -529,6 +535,47 @@ async function pollJob() {
     </div>`);
   if (!done) setTimeout(pollJob, 2000);
   else refresh();
+}
+
+async function menuScan() {
+  readTitleEdits();
+  const r = await post('/api/review/menu-scan', {rel: RV.rel});
+  if (!r) return;
+  RV.menuJob = r.job;
+  pollMenuScan();
+}
+
+async function pollMenuScan() {
+  const j = await fetch('/api/review/job?id=' + encodeURIComponent(RV.menuJob))
+                  .then(x => x.json()).catch(() => null);
+  if (!j) { setTimeout(pollMenuScan, 3000); return; }
+  const done = j.status === 'done' || j.status === 'failed';
+  openSheet(`
+    <h3>${done ? (j.status === 'done' ? 'Read from the disc menu'
+                                      : 'Could not read the menu')
+               : 'Reading the disc menu…'}</h3>
+    <div class="hint">Rendering every menu and reading each button's label.
+      This takes a few minutes.${j.error ? ' ' + esc(j.error) : ''}</div>
+    <div class="joblog">${(j.log || []).map(esc).join('\n') || 'starting…'}</div>
+    <div class="rowbtns">
+      ${done && j.status === 'done' && (j.names || []).length
+        ? `<button onclick="applyMenuNames()">Use these names, in order</button>` : ''}
+      <button class="ghost" onclick="drawReview()">Back</button>
+    </div>`);
+  if (!done) setTimeout(pollMenuScan, 3000);
+  else RV.menuNames = j.names || [];
+}
+
+// The menu lists extras in the order the disc presents them, which is usually
+// but not always title order. Applied as a starting point to be corrected, not
+// as an answer — hence the source badge and the fact you're looking at them.
+function applyMenuNames() {
+  const names = RV.menuNames || [];
+  RV.data.extras.forEach((t, i) => {
+    if (i < names.length) { t.name = names[i].label; t.source = 'menu'; }
+  });
+  toast(`applied ${Math.min(names.length, RV.data.extras.length)} names — check the order`);
+  drawReview();
 }
 
 async function contribute() {

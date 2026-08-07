@@ -406,7 +406,18 @@ def safe_filename(name):
 
 
 def encode_title(iso_path, title_ix, dest, encoder):
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    target_dir = os.path.dirname(dest)
+    existed = os.path.isdir(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+    if not existed:
+        # Match the ownership the files get. A root-owned Featurettes/ beside
+        # 99:100 files works, but it is the sort of inconsistency that trips up
+        # the next tool to touch the library.
+        try:
+            os.chown(target_dir, OWNER_UID, OWNER_GID)
+            os.chmod(target_dir, 0o775)
+        except (PermissionError, OSError):
+            pass
     partial = dest + ".partial"
 
     cmd = [

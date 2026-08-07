@@ -39,6 +39,11 @@ try:
 except Exception:                                        # noqa: BLE001
     discdb = None
 
+try:
+    import dvdmenu
+except Exception:                                        # noqa: BLE001
+    dvdmenu = None
+
 OUTPUT_DIR = os.environ.get("BASE_OUTPUT_DIR", "/output")
 REVIEW_DIR = os.path.join(OUTPUT_DIR, ".review")
 
@@ -510,6 +515,42 @@ def discdb_status():
         return {"available": True, "synced": False}
     return {"available": True, "synced": True,
             "discs": index.get("count", 0), "built": index.get("built")}
+
+
+def start_menu_scan(iso_path):
+    """Read the disc's own menus for extra names, on a background thread.
+
+    Minutes of work — every menu has to be rendered to frames and every button
+    region OCRed — so this is never part of inspecting a disc. It is offered
+    when TheDiscDb has nothing, which is when it is worth the wait.
+    """
+    if not dvdmenu:
+        raise ValueError("menu reading is unavailable")
+
+    job_id = "menu-%d" % (time.time() * 1000)
+    _set(job_id, status="running", total=1, done=0,
+         current="reading disc menus", log=[])
+
+    def run():
+        try:
+            names = dvdmenu.menu_names(iso_path, want_frames=2)
+            review = load_review(iso_path)
+            review["menu_names"] = [
+                {"label": n["label"], "kind": n["kind"], "score": n["score"]}
+                for n in names]
+            review["menu_scanned"] = time.time()
+            save_review(iso_path, review)
+            for n in names:
+                _append_log(job_id, "%s  [%s]" % (n["label"], n["kind"]))
+            _append_log(job_id, "read %d candidate names" % len(names))
+            _set(job_id, status="done", done=1, current="",
+                 names=review["menu_names"], finished=time.time())
+        except Exception as e:                           # noqa: BLE001
+            _append_log(job_id, "FAILED: %s" % e)
+            _set(job_id, status="failed", error=str(e), finished=time.time())
+
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
 
 
 def start_discdb_sync():

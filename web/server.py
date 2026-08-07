@@ -628,6 +628,24 @@ class Handler(BaseHTTPRequestHandler):
                                        "path": movie.get("path")}})
             return
 
+        # Read the disc's own menus for names. Slow, so it is a job, and it is
+        # only offered when the catalogue came up empty.
+        if path == "/api/review/menu-scan":
+            if not library:
+                self._send(503, {"error": "review unavailable"})
+                return
+            target = self._resolve(payload.get("rel"), want="file")
+            if not target:
+                self._send(404, {"error": "no such ISO"})
+                return
+            try:
+                job_id = library.start_menu_scan(target)
+            except ValueError as e:
+                self._send(400, {"error": str(e)})
+                return
+            self._send(200, {"ok": True, "job": job_id})
+            return
+
         # Prepare a TheDiscDb submission for a disc it does not know about.
         # Writes files only; submitting them is a deliberate human act.
         if path == "/api/review/contribute":

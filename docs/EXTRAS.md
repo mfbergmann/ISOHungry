@@ -128,6 +128,56 @@ refuses to run while the extras are still called *Featurette 01* — the value
 being contributed is the names, and a wrong name in a shared catalogue is worse
 than a gap.
 
+## Reading the disc's own menu
+
+When TheDiscDb has nothing, the disc itself still does: every disc with extras
+has a menu naming them — that is what a menu is for. **Read names from disc
+menu** renders those menus and reads the labels off them.
+
+The names are pixels, not text, so this is OCR and it is a *suggestion*. Names
+it produces are badged `ocr` and always ranked below a TheDiscDb hit.
+
+### How the labels are found
+
+A DVD's buttons are not in the IFO. They live in the highlight information
+(HLI) of each menu VOBU's navigation pack, and every button carries a screen
+rectangle plus an 8-byte VM command. The rectangle is the useful part: it says
+where that button's label is drawn, so each label can be cropped and read on its
+own instead of OCRing a whole menu and guessing which words belong to which
+item.
+
+The crop runs from the left edge of the screen to the button's **right** edge.
+Labels are drawn left-aligned and the highlight rectangle tends to sit over the
+tail of the text, so anchoring on its right edge keeps the label and excludes
+whatever busy video sits beside it.
+
+Two details cost real debugging time and are worth knowing if you touch this:
+
+- **`btn_ns` is at HL_GI offset 17, not 16.** Offset 16 is `btn_ofn`, the index
+  the group starts at. On a paged menu that reads as 4, 8, 12, 16 … — a
+  plausible-looking button count that silently truncates every menu and hides
+  the main menu entirely.
+- **Scene-selection pages are dropped before rendering.** They are chapter jumps
+  into the feature (`JumpVTS_PTT`), they name chapters rather than extras, and a
+  paged one carries fifteen buttons — by far the most expensive thing on a disc
+  to OCR for no benefit.
+
+### What it is good at, and what it is not
+
+Single-line labels on a quiet background come out clean — *Deleted Scenes*,
+*Music Video*. Labels that wrap to two lines over a bright, busy frame do not;
+*International Trailer #1* has come back as `International ... ier 1`. Menu text
+sits on top of moving video, which is close to the worst case for OCR, and no
+amount of thresholding fixes all of it.
+
+It is also slow: every menu has to be rendered to frames and every button
+region OCRed, which is minutes per disc. That is why it is an explicit button
+and a background job rather than part of inspecting a disc.
+
+Names are applied to extras **in menu order**, which is the order a disc lists
+them and usually — not always — the order of their title numbers. Check the
+order before importing; that is what the confirm step is for.
+
 ## Two steps from the CLI, because DVD titles have no names
 
 A DVD title is a number and a duration. Nothing on the disc says which one is
