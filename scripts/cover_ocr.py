@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+from difflib import SequenceMatcher
 import tempfile
 
 # Where the list starts. Studios are not consistent, so this is generous.
@@ -40,27 +41,50 @@ ENDINGS = re.compile(
 # Tesseract renders a round bullet as "e", "o", "0", "@" or "©" more often than
 # not, so those count too - but only when what follows starts like a title,
 # otherwise a sentence beginning "or ..." would be mistaken for an item.
-BULLET = re.compile(r"^\s*[•·▪●∙\*\-–—o0e@©]\s+(?=[\"\x27A-Z0-9])")
+BULLET = re.compile(r"^\s*[•·▪●∙>»\*\-–—o0e@©]\s*(?=[\"\x27A-Z0-9])")
 
 # Studios pad the list with these; they are not extras anyone wants filed.
+# The same list, matched as a prefix rather than the whole entry.
+FILLER_PREFIX = re.compile(
+    r"^\W*(cast\s+and\s+crew|production\s+notes|talent\s+files|"
+    r"scene\s+(selection|access)|interactive\s+menus?|digitally\s+(re)?mastered|"
+    r"[\d.:]*\s*(anamorphic\s+)?widescreen|full\s*screen|"
+    r"[\d.]+\s*(dolby|dts|surround)|dolby\s+digital|dvd-?rom)\b", re.I)
+
 NOT_A_FEATURE = re.compile(
     r"^\W*(and\s+more|much\s+more|plus\s+more|more!?|"
-    r"scene\s+selection|chapter\s+selection|interactive\s+menus?|"
-    r"languages?|subtitles?|audio\s+options?)\W*$", re.I)
+    r"scene\s+(selection|access)|chapter\s+selection|interactive\s+menus?|"
+    r"languages?|subtitles?|audio\s+options?|"
+    # Presentation and packaging claims, printed in the same list as the real
+    # extras but describing the disc rather than anything with a runtime.
+    r"[\d.:]*\s*(anamorphic\s+)?widescreen(\s+version)?|"
+    r"full\s*screen(\s+version)?|[\d.]+\s*dolby[\w\s.]*|dolby[\w\s.]*|"
+    r"[\d.]+\s*(dts|surround)[\w\s.]*|digitally\s+(re)?mastered|"
+    r"cast\s+and\s+crew(\s+information)?|production\s+notes|"
+    r"talent\s+files|film\s*maker.?s?\s+notes|weblink|dvd-?rom[\w\s]*)"
+    r"\W*$", re.I)
 
 
-def ocr_image(path, psm="6", extra_vf=None):
-    """OCR an image, upscaling small photos so tesseract has pixels to work with."""
+# Features panels are overwhelmingly light text on a strong colour. Greyscale
+# alone leaves that text swimming in a mid-grey panel; thresholding hard turns
+# it into black on white, which is what tesseract wants. Measured on a real
+# cover photo: 4 keyword hits with greyscale, 15 with this.
+PREPROCESS = ("scale='min(2000,iw*2)':-1:flags=lanczos,format=gray,"
+              "lut=y='if(gt(val,%d),0,255)'")
+
+
+def ocr_image(path, psm="6", extra_vf=None, threshold=180):
+    """OCR an image, thresholded so light-on-colour text survives."""
     with tempfile.TemporaryDirectory(prefix="cover-") as work:
         prepared = os.path.join(work, "p.png")
-        vf = extra_vf or "scale='min(2400,iw*2)':-1:flags=lanczos,format=gray"
+        vf = extra_vf or (PREPROCESS % threshold)
         proc = subprocess.run(
             ["ffmpeg", "-loglevel", "error", "-y", "-i", path, "-vf", vf, prepared],
-            capture_output=True, timeout=180)
+            capture_output=True, timeout=420)
         if proc.returncode != 0 or not os.path.exists(prepared):
             prepared = path                      # let tesseract try the original
         out = subprocess.run(["tesseract", prepared, "stdout", "--psm", psm],
-                             capture_output=True, timeout=180)
+                             capture_output=True, timeout=420)
         return out.stdout.decode("utf-8", "replace")
 
 
@@ -73,10 +97,31 @@ def _clean_item(text):
     return text
 
 
+def _is_filler(text):
+    """Spec claims and DVD-ROM padding, matched on how the entry opens.
+
+    Requiring a whole-string match let any of these through as soon as OCR
+    dragged a few words of the adjacent synopsis column onto the end.
+    """
+    return bool(NOT_A_FEATURE.match(text) or FILLER_PREFIX.match(text))
+
+
+def _trim_bleed(text):
+    """Drop trailing debris picked up from a neighbouring column.
+
+    Cover art puts a synopsis beside the features panel, and OCR reading in
+    rows splices the two. A run of shouting capitals after a normal-looking
+    title is that other column, not part of the feature.
+    """
+    text = re.sub(r"\s+[A-Z]{3,}(\s+[A-Z0-9'\".,-]{2,}){1,}\s*$", "", text)
+    # Stray single tokens and symbols left at the end by the same effect.
+    text = re.sub(r"(\s+[^\w\s]+)+\s*$", "", text)
+    text = re.sub(r"\s+[a-z]{1,3}\s*$", "", text)
+    return text.strip(" .,;:-–—")
+
+
 def _plausible(text):
     if len(text) < 3 or len(text) > 90:
-        return False
-    if NOT_A_FEATURE.match(text):
         return False
     letters = sum(c.isalpha() for c in text)
     return letters >= 3 and letters >= len(text) * 0.5
@@ -96,6 +141,11 @@ def parse_features(text):
         if HEADINGS.search(line):
             start = i
             break
+        # Covers set the heading over two lines as often as one:
+        # "SPECIAL" / "FEATURES *". Test the pair before giving up on it.
+        if i + 1 < len(lines) and HEADINGS.search(line + " " + lines[i + 1]):
+            start = i + 1
+            break
     if start is None:
         return [], "no special-features heading found"
 
@@ -106,7 +156,9 @@ def parse_features(text):
         tail.append(head_rest[1])
 
     for line in lines[start + 1:]:
-        if ENDINGS.search(line):
+        # Only an unbulleted line can end the list. The legal and technical
+        # block is never bulleted; spec claims inside the list often are.
+        if ENDINGS.search(line) and not BULLET.match(line):
             break
         if not line.strip():
             # A blank line after we have items usually means the list ended.
@@ -115,19 +167,37 @@ def parse_features(text):
                 continue
         tail.append(line)
 
-    bulleted = [l for l in tail if BULLET.match(l)]
-    if len(bulleted) >= 2:
-        source = bulleted                         # trust the printed bullets
+    # Group into items: a bulleted line starts one, an unbulleted line under it
+    # continues it. Covers wrap long features across two or three lines, and
+    # treating each line as its own item loses the tail of every one of them.
+    grouped, current = [], None
+    for line in tail:
+        if not line.strip():
+            if current:
+                grouped.append(current)
+                current = None
+            continue
+        if BULLET.match(line):
+            if current:
+                grouped.append(current)
+            current = _clean_item(line)
+        elif current:
+            current = (current + " " + line.strip()).strip()
+    if current:
+        grouped.append(current)
+
+    if len(grouped) >= 2:
+        source = grouped                          # trust the printed bullets
     else:
         # Prose: split on the separators studios use between features.
         joined = " ".join(l.strip() for l in tail if l.strip())
-        source = re.split(r"\s*[•·▪●]\s*|\s\|\s|;\s*", joined)
+        source = re.split(r"\s*[•·▪●>]\s*|\s\|\s|;\s*", joined)
         if len(source) < 2:
             source = re.split(r",\s+(?=[A-Z0-9])", joined)
 
     for raw in source:
-        item = _clean_item(raw)
-        if _plausible(item):
+        item = _trim_bleed(_clean_item(raw))
+        if _plausible(item) and not _is_filler(item):
             items.append(item)
 
     # OCR repeats lines when a photo is skewed; keep first occurrences.
@@ -140,17 +210,61 @@ def parse_features(text):
     return out, None if out else "heading found but no features parsed under it"
 
 
+def _same_item(a, b):
+    """Whether two reads are the same feature seen through different noise."""
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+    # A pass that clipped an entry leaves a fragment of one another pass read in
+    # full. Comparing a fragment against the whole of the longer entry always
+    # scores low, so compare it against the matching head instead - but only
+    # when it really is a fragment, or two different commentaries that open
+    # with the same six words would collapse into one.
+    if len(short) < len(long_) * 0.6:
+        return SequenceMatcher(None, short, long_[:len(short)]).ratio() >= 0.85
+    return SequenceMatcher(None, na, nb).ratio() >= 0.75
+
+
+def _norm(text):
+    return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
+
+
+def _quality(text):
+    """Prefer the cleaner reading of the same feature."""
+    words = [w for w in text.split() if len(w) > 1]
+    real = sum(1 for w in words if re.fullmatch(r"[A-Za-z][A-Za-z'-]*", w))
+    return real * 2 - (len(words) - real)
+
+
 def read_cover(path):
-    """Best-effort features list, trying a couple of page-segmentation modes."""
-    best, best_err = [], "could not read the image"
-    for psm in ("6", "4", "3"):
-        text = ocr_image(path, psm=psm)
+    """Features list, merged across several readings of the same photo.
+
+    No single pass gets a whole panel: thresholds that recover the bright
+    heading can blow out the smaller entries below it, and the page-segmentation
+    mode that keeps the features column clean sometimes drops its last lines.
+    Taking only the best pass threw away entries that another pass had read
+    perfectly well, so the passes are merged and near-duplicates collapsed to
+    whichever reading looks cleanest.
+    """
+    merged, err_seen = [], "could not read the image"
+    for psm, threshold in (("4", 180), ("6", 180), ("4", 200), ("6", 150),
+                           ("3", 180)):
+        text = ocr_image(path, psm=psm, threshold=threshold)
         items, err = parse_features(text)
-        if len(items) > len(best):
-            best, best_err = items, err
-        if len(best) >= 3:
-            break
-    return best, (None if best else best_err)
+        if err and not merged:
+            err_seen = err
+        for item in items:
+            for i, existing in enumerate(merged):
+                if _same_item(existing, item):
+                    if _quality(item) > _quality(existing):
+                        merged[i] = item
+                    break
+            else:
+                merged.append(item)
+    return merged, (None if merged else err_seen)
 
 
 def main():
