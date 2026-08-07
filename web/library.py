@@ -380,6 +380,14 @@ def _append_log(job_id, line):
 def start_import(iso_path, tmdb_id, extras, include_feature=False,
                  feature_ix=None, feature_name=None, add_if_missing=True):
     """Confirm the film, then kick off encoding on a background thread."""
+    # One import per disc. Two jobs on the same ISO would race for the same
+    # .partial paths and interleave two HandBrake runs over one optical image
+    # for no gain, and the second would silently "skip (exists)" whatever the
+    # first had already finished.
+    if review_status(iso_path) == "importing":
+        raise ValueError("this disc is already importing — "
+                         "let it finish, or wait for it to fail")
+
     movie = None
     for m in ei.radarr_get("movie"):
         if m.get("tmdbId") == tmdb_id:
