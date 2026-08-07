@@ -377,6 +377,11 @@ def slugify(text):
     return text or "unknown"
 
 
+def safe_component(name):
+    """A filename a reviewer could actually use, without path separators."""
+    return re.sub(r'[/\\\\:*?"<>|]+', " ", str(name or "")).strip() or "Untitled"
+
+
 def seconds_to_duration(secs):
     secs = int(round(secs))
     return "%d:%02d:%02d" % (secs // 3600, (secs % 3600) // 60, secs % 60)
@@ -458,10 +463,35 @@ def export_contribution(iso_path, movie, titles, out_dir, release_title=None,
     _write(os.path.join(rel_dir, "release.json"), release)
     _write(os.path.join(rel_dir, "disc01.json"), disc)
 
-    # The file listing the hash was taken over, so a reviewer can recompute it.
-    with open(os.path.join(rel_dir, "disc01-files.txt"), "w") as fh:
+    # disc01-summary.txt is what their CI actually validates (housekeeping/
+    # appliances/check-summaries.ts): chunks separated by blank lines, Name and
+    # Type mandatory, Type drawn from a fixed list, numeric fields integers, and
+    # "File name" last in its chunk. Segment map and Comment are MakeMKV
+    # artefacts we cannot produce and the validator treats as optional.
+    with open(os.path.join(rel_dir, "disc01-summary.txt"), "w",
+              encoding="utf-8") as fh:
+        for n, t in enumerate(titles):
+            if not t.get("name"):
+                continue
+            if n:
+                fh.write("\n")
+            fh.write("Name: %s\n" % t["name"])
+            fh.write("Type: %s\n" % (t.get("discdb_type") or "Extra"))
+            if t.get("discdb_type") == "MainMovie" and movie.get("year"):
+                fh.write("Year: %s\n" % movie["year"])
+            fh.write("Source title ID: %02d\n" % int(t["ix"]))
+            fh.write("Duration: %s\n" % seconds_to_duration(t["seconds"]))
+            if t.get("chapters"):
+                fh.write("Chapters count: %d\n" % int(t["chapters"]))
+            # Must be last in the chunk; the validator checks exactly that.
+            fh.write("File name: %s.mkv\n" % safe_component(t["name"]))
+
+    # A MakeMKV-shaped log carrying only the HSH lines. Their importer derives
+    # ContentHash from exactly these (TheDiscDb.Core HashLogFile), so a reviewer
+    # can recompute the hash from the submission instead of taking it on trust.
+    with open(os.path.join(rel_dir, "disc01.txt"), "w", encoding="utf-8") as fh:
         for i, (name, size) in enumerate(sorted(files, key=lambda f: f[0])):
-            fh.write("%d,%s,%d\n" % (i, name, size))
+            fh.write("HSH:%d,%s,,%d\n" % (i, name, size))
 
     return {"dir": base, "release_dir": rel_dir, "content_hash": h,
             "titles": len(disc_titles),

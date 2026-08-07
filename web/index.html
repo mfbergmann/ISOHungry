@@ -587,8 +587,10 @@ async function contribute() {
     movie: {title: c.title, year: c.year, tmdbId: c.tmdbId},
     featureIx: d.feature.ix,
     featureSeconds: d.feature.seconds,
+    featureChapters: d.feature.chapters,
     extras: d.extras.map(t => ({ix: t.ix, seconds: t.seconds, name: t.name,
-                                subdir: t.subdir, include: t.include})),
+                                chapters: t.chapters, subdir: t.subdir,
+                                include: t.include})),
   });
   if (!r) return;
   openSheet(`

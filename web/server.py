@@ -671,6 +671,7 @@ class Handler(BaseHTTPRequestHandler):
                         "name": (t.get("name") or "").strip()[:120],
                         "subdir": (t.get("subdir") or "").strip()[:40],
                         "include": bool(t.get("include")),
+                        "chapters": int(t.get("chapters") or 0),
                     })
                 except (TypeError, ValueError):
                     continue
@@ -679,6 +680,7 @@ class Handler(BaseHTTPRequestHandler):
                     target, movie, extras,
                     feature_ix=payload.get("featureIx"),
                     feature_seconds=payload.get("featureSeconds"),
+                    feature_chapters=payload.get("featureChapters"),
                     release_title=(payload.get("releaseTitle") or "").strip()[:120] or None,
                     release_year=payload.get("releaseYear"))
             except (ValueError, Exception) as e:         # noqa: BLE001

@@ -237,6 +237,7 @@ def inspect_iso(iso_path):
             "ix": feature["ix"],
             "duration": ei.human_duration(feature["seconds"]),
             "seconds": feature["seconds"],
+            "chapters": feature["chapters"],
         },
         "extras": extra_rows,
         "skipped": [
@@ -456,7 +457,7 @@ def _append_log(job_id, line):
 
 
 def contribute(iso_path, movie, extras, feature_ix=None, feature_seconds=None,
-               release_title=None, release_year=None):
+               feature_chapters=None, release_title=None, release_year=None):
     """Prepare a TheDiscDb submission for a disc the catalogue does not have.
 
     Only worth doing once a human has named the extras: the value being
@@ -472,11 +473,13 @@ def contribute(iso_path, movie, extras, feature_ix=None, feature_seconds=None,
                          "'Featurette 01' is worse than no submission")
 
     titles = [{"ix": t["ix"], "seconds": t["seconds"], "name": t["name"],
-               "discdb_type": _plex_to_discdb(t.get("subdir"))}
+               "discdb_type": _plex_to_discdb(t.get("subdir")),
+               "chapters": t.get("chapters")}
               for t in named]
     if feature_ix is not None:
         titles.insert(0, {"ix": feature_ix, "seconds": feature_seconds,
-                          "name": movie["title"], "discdb_type": "MainMovie"})
+                          "name": movie["title"], "discdb_type": "MainMovie",
+                          "chapters": feature_chapters})
 
     out_dir = os.path.join(OUTPUT_DIR, ".discdb", "submissions")
     result = discdb.export_contribution(
